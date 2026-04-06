@@ -139,8 +139,13 @@ def gemini_request(api_key: str, parts: list) -> str:
         candidates = result.get("candidates", [])
         if not candidates:
             raise RuntimeError("Gemini returned no candidates")
-        parts_out = candidates[0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in parts_out)
+        content = candidates[0].get("content", {})
+        parts_out = content.get("parts", [])
+        text = "".join(p.get("text", "") for p in parts_out)
+        if not text:
+            finish_reason = candidates[0].get("finishReason", "UNKNOWN")
+            raise RuntimeError(f"Gemini returned empty response (finishReason: {finish_reason}). URLにアクセスできないか、コンテンツが取得できませんでした。")
+        return text
     except (KeyError, IndexError) as e:
         raise RuntimeError(f"Gemini response parse error: {e}\nRaw: {result}")
 
