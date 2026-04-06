@@ -19,6 +19,7 @@ main.py - News Cheker Webhook サーバー（FastAPI）
 import os
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 import gemini_client
 import notion_writer
@@ -37,6 +38,13 @@ def _load_dotenv():
 _load_dotenv()
 
 app = FastAPI(title="News Cheker Webhook", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
