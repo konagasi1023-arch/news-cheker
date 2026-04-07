@@ -44,13 +44,37 @@ def fetch_title(url: str) -> str:
     """URLにアクセスしてHTMLのtitleタグを取得する（短縮URLも自動追跡）"""
     try:
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         })
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            html = resp.read(8192).decode("utf-8", errors="ignore")
-        match = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            # charsetをレスポンスヘッダーから取得
+            content_type = resp.headers.get("Content-Type", "")
+            charset_match = re.search(r"charset=([\w-]+)", content_type)
+            charset = charset_match.group(1) if charset_match else None
+            raw = resp.read(16384)
+
+        # charsetがヘッダーにない場合はmetaタグから取得
+        if not charset:
+            meta_match = re.search(
+                rb'<meta[^>]+charset=["\']?([\w-]+)', raw, re.IGNORECASE
+            )
+            charset = meta_match.group(1).decode("ascii", errors="ignore") if meta_match else "utf-8"
+
+        html = raw.decode(charset, errors="ignore")
+
+        # titleタグ抽出
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            return ""
+
+        title = title_match.group(1).strip()
+
+        # HTMLエンティティをデコード
+        import html as html_module
+        title = html_module.unescape(title)
+
+        # 改行・タブを除去して返す
+        return re.sub(r"\s+", " ", title).strip()
     except Exception:
         pass
     return ""
