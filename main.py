@@ -235,14 +235,15 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
 <h2>❌ 保存に失敗しました</h2><p>{e}</p>
 </body></html>""")
 
-    return HTMLResponse(content="""<!DOCTYPE html>
+    return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8"><title>News Cheker</title>
 <meta name="theme-color" content="#4285f4">
-<style>body{font-family:sans-serif;text-align:center;padding:60px 20px;background:#1a1a2e;color:#fff;}</style>
+<style>body{{font-family:sans-serif;text-align:center;padding:40px 20px;background:#1a1a2e;color:#fff;}}
+p{{word-break:break-all;font-size:0.9em;opacity:0.8;}}</style>
 </head><body>
 <h2>✅ 保存しました</h2>
-<p>Notion に追加されました。</p>
-<script>setTimeout(()=>window.close(),2000);</script>
+<p>{title}</p>
+<script>setTimeout(()=>window.close(),3000);</script>
 </body></html>""")
 
 
