@@ -158,9 +158,15 @@ def _fallback_title(url: str) -> str:
 @app.get("/save")
 async def save_from_share(url: str = "", title: str = "", text: str = ""):
     """PWA シェアターゲット：Chrome の共有から URL を受信して Notion に保存"""
-    # ChromeによってはURLがtextパラメータで送られてくる
-    if not url and text.startswith("http"):
-        url = text
+    import re
+    # urlが空の場合、textからURLを抽出（SmartNews等はURLをtextに埋め込む）
+    if not url and text:
+        match = re.search(r'https?://\S+', text)
+        if match:
+            url = match.group()
+    # titleが空でtextにURLが含まれる場合、URL以外の部分をtitleに使う
+    if not title and text:
+        title = re.sub(r'https?://\S+', '', text).strip(" -\n")
     if not url:
         return HTMLResponse(content="<html><body><p>URLが指定されていません</p></body></html>")
 
