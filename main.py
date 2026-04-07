@@ -51,7 +51,7 @@ def fetch_title(url: str) -> str:
             content_type = resp.headers.get("Content-Type", "")
             charset_match = re.search(r"charset=([\w-]+)", content_type)
             charset = charset_match.group(1) if charset_match else None
-            raw = resp.read(16384)
+            raw = resp.read(65536)
 
         # charsetがヘッダーにない場合はmetaタグから取得
         if not charset:
