@@ -44,7 +44,7 @@ def fetch_title(url: str) -> str:
     """URLにアクセスしてHTMLのtitleタグを取得する（短縮URLも自動追跡）"""
     try:
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
         })
         with urllib.request.urlopen(req, timeout=8) as resp:
             # charsetをレスポンスヘッダーから取得
