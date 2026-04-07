@@ -84,6 +84,7 @@ async def manifest():
             "method": "GET",
             "params": {
                 "title": "title",
+                "text": "text",
                 "url": "url"
             }
         }
@@ -155,8 +156,11 @@ def _fallback_title(url: str) -> str:
 
 
 @app.get("/save")
-async def save_from_share(url: str = "", title: str = ""):
+async def save_from_share(url: str = "", title: str = "", text: str = ""):
     """PWA シェアターゲット：Chrome の共有から URL を受信して Notion に保存"""
+    # ChromeによってはURLがtextパラメータで送られてくる
+    if not url and text.startswith("http"):
+        url = text
     if not url:
         return HTMLResponse(content="<html><body><p>URLが指定されていません</p></body></html>")
 
