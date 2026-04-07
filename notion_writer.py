@@ -11,6 +11,9 @@ import os
 import urllib.request
 import urllib.error
 import re
+from datetime import datetime, timezone, timedelta
+
+JST = timezone(timedelta(hours=9))
 
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_API_VERSION = "2022-06-28"
@@ -65,6 +68,9 @@ def save_to_notion(url: str, title: str, token: str, database_id: str) -> str:
                 "title": [{"type": "text", "text": {"content": title[:500]}}]
             },
             "URL": {"url": url},
+            "日付": {
+                "date": {"start": datetime.now(JST).isoformat()}
+            },
         },
     }
 
