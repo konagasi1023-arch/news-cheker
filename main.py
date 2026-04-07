@@ -62,18 +62,29 @@ def fetch_title(url: str) -> str:
 
         html = raw.decode(charset, errors="ignore")
 
-        # titleタグ抽出
+        import html as html_module
+
+        # OGタグ → twitter:title → titleタグの順で取得
+        og_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if not og_match:
+            og_match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']', html, re.IGNORECASE)
+
+        tw_match = re.search(r'<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if not tw_match:
+            tw_match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:title["\']', html, re.IGNORECASE)
+
         title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-        if not title_match:
+
+        raw_title = (
+            og_match.group(1) if og_match else
+            tw_match.group(1) if tw_match else
+            title_match.group(1) if title_match else
+            ""
+        )
+        if not raw_title:
             return ""
 
-        title = title_match.group(1).strip()
-
-        # HTMLエンティティをデコード
-        import html as html_module
-        title = html_module.unescape(title)
-
-        # 改行・タブを除去して返す
+        title = html_module.unescape(raw_title.strip())
         return re.sub(r"\s+", " ", title).strip()
     except Exception:
         pass
