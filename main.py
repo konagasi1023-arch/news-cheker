@@ -17,10 +17,24 @@ main.py - News Cheker サーバー（FastAPI）
 
 import os
 import json
+import struct
+import zlib
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+
+def _make_png(width: int, height: int, r: int, g: int, b: int) -> bytes:
+    """標準ライブラリのみで単色 PNG を生成する"""
+    def chunk(name: bytes, data: bytes) -> bytes:
+        c = name + data
+        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+    raw = b''.join(b'\x00' + bytes([r, g, b] * width) for _ in range(height))
+    return (b'\x89PNG\r\n\x1a\n'
+            + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(raw))
+            + chunk(b'IEND', b''))
 
 import notion_writer
 
@@ -61,6 +75,8 @@ async def manifest():
         "background_color": "#1a1a2e",
         "theme_color": "#4285f4",
         "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"},
             {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}
         ],
         "share_target": {
@@ -79,6 +95,16 @@ async def manifest():
 async def service_worker():
     js = "self.addEventListener('fetch', e => e.respondWith(fetch(e.request)));"
     return Response(content=js, media_type="application/javascript")
+
+
+@app.get("/icon-192.png")
+async def icon_192():
+    return Response(content=_make_png(192, 192, 66, 133, 244), media_type="image/png")
+
+
+@app.get("/icon-512.png")
+async def icon_512():
+    return Response(content=_make_png(512, 512, 66, 133, 244), media_type="image/png")
 
 
 @app.get("/icon.svg")
