@@ -36,7 +36,24 @@ def _make_png(width: int, height: int, r: int, g: int, b: int) -> bytes:
             + chunk(b'IDAT', zlib.compress(raw))
             + chunk(b'IEND', b''))
 
+import urllib.request
 import notion_writer
+
+
+def fetch_title(url: str) -> str:
+    """URLにアクセスしてHTMLのtitleタグを取得する（短縮URLも自動追跡）"""
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            html = resp.read(8192).decode("utf-8", errors="ignore")
+        match = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    except Exception:
+        pass
+    return ""
 
 # .env ファイルがある場合は自動読み込み
 def _load_dotenv():
@@ -171,7 +188,7 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
         return HTMLResponse(content="<html><body><p>URLが指定されていません</p></body></html>")
 
     if not title:
-        title = _fallback_title(url)
+        title = fetch_title(url) or _fallback_title(url)
 
     try:
         token, database_id = notion_writer.get_credentials()
@@ -212,7 +229,7 @@ async def webhook(request: Request):
         raise HTTPException(status_code=400, detail=f"無効な URL です: {url}")
 
     if not title:
-        title = _fallback_title(url)
+        title = fetch_title(url) or _fallback_title(url)
 
     try:
         token, database_id = notion_writer.get_credentials()
