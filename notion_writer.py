@@ -69,7 +69,7 @@ def save_to_notion(url: str, title: str, token: str, database_id: str) -> str:
             },
             "URL": {"url": url},
             "日付": {
-                "date": {"start": datetime.now(JST).isoformat()}
+                "date": {"start": datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S+09:00")}
             },
         },
     }
