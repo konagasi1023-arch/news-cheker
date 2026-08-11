@@ -78,8 +78,11 @@ def parse_page(pg: dict) -> dict:
     for val in pg.get("properties", {}).values():
         kind = val.get("type")
         if kind == "title":
-            item["title"] = "".join(
-                a.get("plain_text", "") for a in val.get("title", []))
+            title = "".join(a.get("plain_text", "") for a in val.get("title", []))
+            # 共有元アプリが付けた前後の引用符を取り除く
+            if len(title) > 1 and title[0] == title[-1] == '"':
+                title = title[1:-1].strip()
+            item["title"] = title
         elif kind == "url":
             item["url"] = val.get("url") or ""
         elif kind == "select":
