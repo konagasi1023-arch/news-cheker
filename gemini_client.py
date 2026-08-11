@@ -13,6 +13,7 @@ gemini_client.py - Gemini 2.5 Flash + Google Search Grounding クライアント
 import json
 import os
 import re
+import time
 import urllib.request
 import urllib.error
 import datetime
@@ -205,3 +206,218 @@ def analyze(payload: dict) -> dict:
     summary = extract_summary(full_text)
 
     return {"title": title, "full_text": full_text, "summary": summary}
+
+
+# ---------------------------------------------------------------------------
+# 自動カテゴリ / タグ分類
+# ---------------------------------------------------------------------------
+
+# 分類・要約は flash とは別クォータの軽量モデルを使う。
+# （flash の無料枠は1日20回と少なく、記事ごとの呼び出しには不向きなため）
+CLASSIFY_MODEL = "gemini-3.5-flash-lite"
+
+# 実際に保存済みの記事363件を集計して決めたカテゴリ。
+# AI関連が全体の約6割を占めるため、AIは用途で3分割している。
+CATEGORIES = [
+    "AIツール活用術",
+    "AI開発・技術",
+    "AI業界動向",
+    "マーケティング・広告",
+    "経営・組織・人材",
+    "リサーチ・データ",
+    "脳科学・心理・哲学",
+    "その他",
+]
+
+FALLBACK_CATEGORY = "その他"
+MAX_TAGS = 4
+
+CLASSIFY_PROMPT = """以下の記事を分類し、要約してください。
+
+タイトル: {title}
+URL: {url}
+本文・抜粋: {context}
+
+【カテゴリ】次の中から最も適切なものを1つだけ選ぶ:
+- AIツール活用術 … Claude/Gemini/ChatGPT等の使い方・プロンプト・活用事例
+- AI開発・技術 … MCP・AIエージェント開発・LLMの仕組み・API・実装や自動化
+- AI業界動向 … 新モデル発表・企業の戦略や提携・資金調達・市場ニュース
+- マーケティング・広告 … ブランド・広告・EC・リテール・消費者・販促
+- 経営・組織・人材 … 経営戦略・組織設計・チーム・リーダーシップ・働き方・採用
+- リサーチ・データ … 調査結果・統計・データ分析手法・レポート・学術論文
+- 脳科学・心理・哲学 … 脳科学・認知科学・心理学・進化論・哲学・思考法
+- その他 … 上記のいずれにも当てはまらないもの
+
+【タグ】記事を特徴づけるキーワードを{max_tags}個以内。
+製品名・技術名・具体的なテーマを短い語で（例: Claude Code, MCP, プロンプト, SEO）。
+
+【3行要約】記事の要点を最大3行、各行60字以内で。
+与えられた情報から確実に言えることだけを書き、推測で補わない。
+情報が少ない場合は1〜2行でよい。
+
+JSON形式のみで出力: {{"category": "...", "tags": ["...", "..."], "summary": ["1行目", "2行目", "3行目"]}}"""
+
+
+def classify(title: str, url: str = "", context: str = "") -> dict:
+    """
+    記事のタイトル（＋URL・本文抜粋）からカテゴリ・タグ・3行要約を生成する。
+
+    保存フローを止めないことを最優先にしており、API キー未設定・通信失敗・
+    解析失敗のいずれでも例外を投げず、フォールバック値を返す。
+
+    Args:
+        context: 記事本文の抜粋（SNSポスト本文や meta description）。要約の根拠になる。
+
+    Returns:
+        {"category": str, "tags": list[str], "summary": list[str], "ok": bool}
+        ok が False のときは分類できずフォールバックした状態を示す。
+        呼び出し側はこれを見て「分類済み」として記録しないよう判断できる。
+    """
+    fallback = {"category": FALLBACK_CATEGORY, "tags": [], "summary": [], "ok": False}
+
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key or not title:
+        return fallback
+
+    prompt = CLASSIFY_PROMPT.format(
+        title=title[:300], url=url[:300], context=context[:1500] or "（なし）",
+        max_tags=MAX_TAGS,
+    )
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            # gemini-2.5-flash は思考トークンも maxOutputTokens を消費する。
+            # 出力自体は50トークン程度だが、思考分を見込んで余裕を持たせる。
+            "maxOutputTokens": 4000,
+            "responseMimeType": "application/json",
+        },
+    }
+    body = json.dumps(payload).encode("utf-8")
+    url_ = f"{GEMINI_API_BASE}/{CLASSIFY_MODEL}:generateContent?key={api_key}"
+
+    # 無料枠はレート制限に触れやすいため、429 のときだけ間を空けて再試行する
+    data = None
+    for attempt in range(3):
+        req = urllib.request.Request(
+            url_, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            parts = result["candidates"][0]["content"]["parts"]
+            data = json.loads("".join(p.get("text", "") for p in parts))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                time.sleep(5 * (attempt + 1))
+                continue
+            print(f"[classify] HTTP {e.code}: {title[:40]}")
+            return fallback
+        except Exception as e:
+            print(f"[classify] {type(e).__name__}: {title[:40]}")
+            return fallback
+
+    if data is None:
+        return fallback
+
+    category = data.get("category", "")
+    if category not in CATEGORIES:
+        category = FALLBACK_CATEGORY
+
+    # Notion の multi_select はカンマを使えないため除去する
+    tags = []
+    for tag in data.get("tags") or []:
+        if isinstance(tag, str):
+            cleaned = tag.replace(",", " ").strip()[:60]
+            if cleaned:
+                tags.append(cleaned)
+
+    summary = [
+        s.strip()[:120] for s in (data.get("summary") or [])
+        if isinstance(s, str) and s.strip()
+    ][:3]
+
+    return {"category": category, "tags": tags[:MAX_TAGS], "summary": summary, "ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 日次・週次レポート生成
+# ---------------------------------------------------------------------------
+
+REPORT_PROMPT = """あなたは優秀なニュース編集者です。
+以下は読者が{label}に保存した記事の一覧です（タイトル・カテゴリ・タグ・要約）。
+
+{articles}
+
+この読者のために、次の構成で「{label}のふりかえりレポート」を日本語で書いてください。
+音声読み上げ（NotebookLM等）でも聴きやすいよう、見出し以外は自然な文章体にすること。
+
+# 概況
+（今回の保存傾向を2〜3文で。何に関心が向いていたか）
+
+# カテゴリ別ハイライト
+（保存が多かったカテゴリごとに、まとめて2〜3文で紹介。件数が少ないカテゴリは省略可）
+
+# 特に注目すべき3件
+（重要度の高い記事を3つ選び、それぞれ「なぜ今これが重要か」を2〜3文で解説）
+
+# 明日へのアクション
+（この読者が次に取るべき具体的な行動を1〜2点）
+
+与えられた情報にない事実を創作しないこと。"""
+
+
+def generate_report(articles: list, label: str) -> str:
+    """
+    記事リストからふりかえりレポートを生成する。
+
+    Args:
+        articles: [{"title": str, "category": str, "tags": list, "summary": list}, ...]
+        label: "今日" "今週" など期間を表す語
+
+    Returns:
+        レポート本文（Markdown風テキスト）。失敗時は RuntimeError。
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY が設定されていません")
+
+    lines = []
+    for a in articles:
+        parts = [f"・「{a.get('title', '')[:100]}」"]
+        if a.get("category"):
+            parts.append(f"[{a['category']}]")
+        if a.get("tags"):
+            parts.append("タグ: " + " / ".join(a["tags"][:4]))
+        lines.append(" ".join(parts))
+        for s in (a.get("summary") or [])[:3]:
+            lines.append(f"    {s}")
+
+    prompt = REPORT_PROMPT.format(label=label, articles="\n".join(lines)[:30000])
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 8000},
+    }
+    body = json.dumps(payload).encode("utf-8")
+
+    # 品質優先で flash を使い、無料枠切れ（429等）なら軽量モデルへフォールバック
+    last_error = None
+    for model in (GEMINI_MODEL, CLASSIFY_MODEL):
+        req = urllib.request.Request(
+            f"{GEMINI_API_BASE}/{model}:generateContent?key={api_key}",
+            data=body, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            parts_out = result["candidates"][0]["content"]["parts"]
+            text = "".join(p.get("text", "") for p in parts_out)
+            if text.strip():
+                return text.strip()
+            last_error = RuntimeError(f"{model}: empty response")
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise RuntimeError(f"レポート生成に失敗しました: {last_error}")

@@ -17,6 +17,7 @@ main.py - News Cheker サーバー（FastAPI）
 
 import os
 import json
+import re
 import struct
 import zlib
 from urllib.parse import urlparse
@@ -36,12 +37,76 @@ def _make_png(width: int, height: int, r: int, g: int, b: int) -> bytes:
             + chunk(b'IDAT', zlib.compress(raw))
             + chunk(b'IEND', b''))
 
+import html as html_module
 import urllib.request
+import urllib.parse
 import notion_writer
+import gemini_client
+
+X_STATUS_RE = re.compile(
+    r"https?://(?:x|twitter|mobile\.twitter)\.com/[^/]+/status(?:es)?/\d+"
+)
 
 
-def fetch_title(url: str) -> str:
-    """URLにアクセスしてHTMLのtitleタグを取得する（短縮URLも自動追跡）"""
+def fetch_x_post(url: str) -> dict:
+    """
+    X（Twitter）のポストを公式 oEmbed API で取得する（認証不要・公開ポストのみ）。
+    取得できたら {"title": "投稿者: 本文冒頭", "description": ポスト全文} を返す。
+    """
+    if not X_STATUS_RE.match(url):
+        return None
+    api = ("https://publish.twitter.com/oembed?omit_script=1&lang=ja&url="
+           + urllib.parse.quote(url, safe=""))
+    try:
+        req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+    author = data.get("author_name", "")
+    text = ""
+    m = re.search(r"<p[^>]*>(.*?)</p>", data.get("html", ""), re.DOTALL)
+    if m:
+        text = re.sub(r"<br\s*/?>", "\n", m.group(1))
+        text = html_module.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+
+    if not (author or text):
+        return None
+
+    first_line = text.split("\n")[0] if text else ""
+    title = f"{author}: {first_line[:60]}" if author else first_line[:80]
+    return {"title": title.strip(" :"), "description": text[:1000]}
+
+
+def _extract_meta(html: str, prop_patterns: list) -> str:
+    """メタタグの content を取得する（属性順が逆のパターンにも対応）"""
+    for attr, name in prop_patterns:
+        m = re.search(
+            rf'<meta[^>]+{attr}=["\']{name}["\'][^>]+content=["\']([^"\']+)["\']',
+            html, re.IGNORECASE)
+        if not m:
+            m = re.search(
+                rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+{attr}=["\']{name}["\']',
+                html, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def fetch_meta(url: str) -> dict:
+    """
+    URL からタイトルと本文抜粋（description）を取得する。
+    X のポストは oEmbed で本文ごと取得する。
+
+    Returns:
+        {"title": str, "description": str}（失敗時はどちらも空文字）
+    """
+    x_post = fetch_x_post(url)
+    if x_post:
+        return x_post
+
+    empty = {"title": "", "description": ""}
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -62,33 +127,51 @@ def fetch_title(url: str) -> str:
 
         html = raw.decode(charset, errors="ignore")
 
-        import html as html_module
-
         # OGタグ → twitter:title → titleタグの順で取得
-        og_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if not og_match:
-            og_match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']', html, re.IGNORECASE)
-
-        tw_match = re.search(r'<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if not tw_match:
-            tw_match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:title["\']', html, re.IGNORECASE)
-
-        title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-
-        raw_title = (
-            og_match.group(1) if og_match else
-            tw_match.group(1) if tw_match else
-            title_match.group(1) if title_match else
-            ""
-        )
+        raw_title = _extract_meta(html, [
+            ("property", "og:title"), ("name", "twitter:title")])
         if not raw_title:
-            return ""
+            title_match = re.search(
+                r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            raw_title = title_match.group(1) if title_match else ""
 
-        title = html_module.unescape(raw_title.strip())
-        return re.sub(r"\s+", " ", title).strip()
+        description = _extract_meta(html, [
+            ("property", "og:description"), ("name", "description")])
+
+        title = re.sub(r"\s+", " ", html_module.unescape(raw_title.strip())).strip()
+        description = html_module.unescape(description.strip())
+        return {"title": title, "description": description[:1000]}
     except Exception:
-        pass
-    return ""
+        return empty
+
+
+def fetch_title(url: str) -> str:
+    """URLにアクセスしてタイトルを取得する（backfill.py 等との互換用）"""
+    return fetch_meta(url)["title"]
+
+
+# URL からトラッキング用パラメータを除去する（重複検知の精度向上のため）
+TRACKING_KEYS = {"fbclid", "gclid", "yclid", "igshid", "igsh", "mc_cid", "mc_eid"}
+
+
+def clean_url(url: str) -> str:
+    """utm_* などのトラッキングパラメータを取り除いた URL を返す"""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if not parts.query:
+            return url
+        is_x = parts.netloc.endswith(("x.com", "twitter.com"))
+        kept = [
+            (k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+            if not k.startswith("utm_")
+            and k not in TRACKING_KEYS
+            and not (is_x and k in ("s", "t"))
+        ]
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, parts.path,
+             urllib.parse.urlencode(kept), parts.fragment))
+    except Exception:
+        return url
 
 # .env ファイルがある場合は自動読み込み
 def _load_dotenv():
@@ -207,27 +290,84 @@ def _fallback_title(url: str) -> str:
         return url
 
 
+def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict:
+    """
+    記事を取得・分類して Notion に保存する（/webhook と /save の共通処理）。
+
+    重複 URL は保存せず既存ページを返す。分類・要約は失敗しても保存を止めない。
+
+    Args:
+        url:          保存するURL（呼び出し側で clean_url 済みであること）
+        title_hint:   共有側から渡されたタイトル（あれば優先）
+        context_hint: 共有側から渡された本文テキスト（SNSポスト本文など）
+
+    Returns:
+        {"duplicate": bool, "notion_url": str, "title": str,
+         "category": str, "tags": list, "summary": list}
+    """
+    token, database_id = notion_writer.get_credentials()
+
+    # 重複チェック：同じURLが既にあれば保存しない
+    try:
+        existing = notion_writer.find_by_url(url, token, database_id)
+    except Exception:
+        existing = ""  # 照会に失敗しても保存は続行する
+    if existing:
+        return {"duplicate": True, "notion_url": existing, "title": title_hint,
+                "category": "", "tags": [], "summary": []}
+
+    # タイトルと本文抜粋を取得（X は oEmbed でポスト本文ごと取れる）
+    meta = fetch_meta(url)
+    title = title_hint or meta["title"] or _fallback_title(url)
+    context = context_hint or meta["description"]
+
+    # 分類できなかった場合はカテゴリを空のままにしておく。
+    # 「その他」と書いてしまうと、後から未分類のページを見分けられなくなるため。
+    category, tags, summary = "", [], []
+    try:
+        notion_writer.ensure_properties(token, database_id)
+        result = gemini_client.classify(title, url, context)
+        if result["ok"]:
+            category, tags, summary = result["category"], result["tags"], result["summary"]
+        else:
+            print(f"[WARN] 分類できませんでした（未分類で保存します）: {title[:40]}")
+    except Exception as e:
+        print(f"[WARN] 分類をスキップしました: {type(e).__name__}: {e}")
+
+    notion_url = notion_writer.save_to_notion(
+        url, title, token, database_id,
+        category=category, tags=tags, summary=summary,
+    )
+    return {"duplicate": False, "notion_url": notion_url, "title": title,
+            "category": category, "tags": tags, "summary": summary}
+
+
 @app.get("/save")
 async def save_from_share(url: str = "", title: str = "", text: str = ""):
     """PWA シェアターゲット：Chrome の共有から URL を受信して Notion に保存"""
-    import re
     # urlが空の場合、textからURLを抽出（SmartNews等はURLをtextに埋め込む）
     if not url and text:
         match = re.search(r'https?://\S+', text)
         if match:
             url = match.group()
-    # titleが空でtextにURLが含まれる場合、URL以外の部分をtitleに使う
-    if not title and text:
-        title = re.sub(r'https?://\S+', '', text).strip(" -\n")
+    # 共有テキストのURL以外の部分は本文（SNSポスト等）として要約の材料に使う
+    shared_text = re.sub(r'https?://\S+', '', text).strip(" -\n") if text else ""
+    if not title and shared_text:
+        title = shared_text[:100]
     if not url:
         return HTMLResponse(content="<html><body><p>URLが指定されていません</p></body></html>")
 
-    if not title:
-        title = fetch_title(url) or _fallback_title(url)
-
     try:
-        token, database_id = notion_writer.get_credentials()
-        notion_writer.save_to_notion(url, title, token, database_id)
+        result = save_article(clean_url(url), title, shared_text)
+        category, tags = result["category"], result["tags"]
+        title = result["title"]
+        if result["duplicate"]:
+            return HTMLResponse(content=f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"><title>News Cheker</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:40px 20px;background:#1a1a2e;color:#fff;">
+<h2>📌 既に保存済みです</h2><p style="word-break:break-all;opacity:0.8;">{url}</p>
+<script>setTimeout(()=>window.close(),3000);</script>
+</body></html>""")
     except RuntimeError as e:
         return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8"><title>エラー</title></head>
@@ -235,14 +375,17 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
 <h2>❌ 保存に失敗しました</h2><p>{e}</p>
 </body></html>""")
 
+    meta = f"{category}｜{' · '.join(tags)}" if category else ""
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8"><title>News Cheker</title>
 <meta name="theme-color" content="#4285f4">
 <style>body{{font-family:sans-serif;text-align:center;padding:40px 20px;background:#1a1a2e;color:#fff;}}
-p{{word-break:break-all;font-size:0.9em;opacity:0.8;}}</style>
+p{{word-break:break-all;font-size:0.9em;opacity:0.8;}}
+.meta{{color:#4285f4;font-size:0.85em;margin-top:12px;}}</style>
 </head><body>
 <h2>✅ 保存しました</h2>
 <p>{title}</p>
+<p class="meta">{meta}</p>
 <script>setTimeout(()=>window.close(),3000);</script>
 </body></html>""")
 
@@ -255,26 +398,85 @@ async def webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="リクエストボディが JSON ではありません")
 
-    url = (body.get("url") or "").strip()
+    raw_url = (body.get("url") or "").strip()
+    raw_text = (body.get("text") or "").strip()
     title = (body.get("title") or "").strip()
 
-    if not url:
-        raise HTTPException(status_code=400, detail="url が必要です")
-
-    if not url.startswith("http://") and not url.startswith("https://"):
-        raise HTTPException(status_code=400, detail=f"無効な URL です: {url}")
-
-    if not title:
-        title = fetch_title(url) or _fallback_title(url)
+    # 共有アプリによっては url 欄に「ポスト本文＋URL」が丸ごと入るため、
+    # URLを正規表現で抽出し、残りは本文（要約の材料）として扱う
+    combined = f"{raw_url}\n{raw_text}".strip()
+    match = re.search(r'https?://\S+', combined)
+    if not match:
+        raise HTTPException(status_code=400, detail=f"URL が見つかりません: {combined[:100]}")
+    url = clean_url(match.group())
+    shared_text = re.sub(r'https?://\S+', '', combined).strip(" -\n")
 
     try:
-        token, database_id = notion_writer.get_credentials()
-        notion_url = notion_writer.save_to_notion(url, title, token, database_id)
+        result = save_article(url, title, shared_text)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=f"Notion API エラー: {e}")
 
-    print(f"[OK] 保存完了: {title} - {url}")
-    return JSONResponse(content={"status": "ok", "title": title, "notion_url": notion_url})
+    if result["duplicate"]:
+        print(f"[SKIP] 重複のため保存せず: {url}")
+        return JSONResponse(content={
+            "status": "duplicate", "notion_url": result["notion_url"], "url": url})
+
+    print(f"[OK] 保存完了: [{result['category']}] {result['title']} - {url}")
+    return JSONResponse(content={
+        "status": "ok",
+        "title": result["title"],
+        "category": result["category"],
+        "tags": result["tags"],
+        "summary": result["summary"],
+        "notion_url": result["notion_url"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 日次・週次レポート
+# ---------------------------------------------------------------------------
+
+REPORT_PERIODS = {
+    "daily": (1, "今日", "日次"),
+    "weekly": (7, "今週", "週次"),
+}
+
+
+@app.get("/report/{period}")
+async def generate_report(period: str, token: str = ""):
+    """
+    保存記事のふりかえりレポートを生成して Notion に保存する。
+    GitHub Actions 等の定期実行から叩く想定。REPORT_TOKEN で保護する。
+    """
+    expected = os.environ.get("REPORT_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="REPORT_TOKEN が設定されていません")
+    if token != expected:
+        raise HTTPException(status_code=403, detail="token が一致しません")
+    if period not in REPORT_PERIODS:
+        raise HTTPException(status_code=404, detail=f"不明な期間です: {period}")
+
+    days, label, kind = REPORT_PERIODS[period]
+    notion_token, database_id = notion_writer.get_credentials()
+
+    articles = notion_writer.fetch_recent_articles(notion_token, database_id, days)
+    if not articles:
+        return JSONResponse(content={"status": "empty", "message": f"{label}の保存記事はありません"})
+
+    try:
+        report_text = gemini_client.generate_report(articles, label)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"レポート生成エラー: {e}")
+
+    date_str = notion_writer.datetime.now(notion_writer.JST).strftime("%Y-%m-%d")
+    title = f"📊 {kind}レポート {date_str}（{len(articles)}件）"
+    notion_url = notion_writer.save_report(title, report_text, notion_token, database_id)
+
+    print(f"[OK] レポート作成: {title}")
+    return JSONResponse(content={
+        "status": "ok", "title": title,
+        "articles": len(articles), "notion_url": notion_url,
+    })
 
 
 @app.get("/health")

@@ -1,0 +1,38 @@
+# 日次・週次レポートの定期実行
+#
+# 必要なセットアップ（GitHubリポジトリの Settings → Secrets and variables → Actions）:
+#   REPORT_URL_DAILY  = https://news-cheker.onrender.com/report/daily?token=＜REPORT_TOKEN＞
+#   REPORT_URL_WEEKLY = https://news-cheker.onrender.com/report/weekly?token=＜REPORT_TOKEN＞
+# あわせて Render.com の環境変数に REPORT_TOKEN を設定すること。
+#
+# Render 無料プランはスリープするため、初回アクセスに時間がかかる。
+# --max-time 180 とリトライで吸収する。
+
+name: reports
+
+on:
+  schedule:
+    - cron: "30 12 * * *"   # 毎日 21:30 JST
+    - cron: "0 13 * * 0"    # 毎週日曜 22:00 JST
+  workflow_dispatch:
+    inputs:
+      period:
+        description: "daily または weekly"
+        default: "daily"
+
+jobs:
+  daily:
+    if: github.event.schedule == '30 12 * * *' || (github.event_name == 'workflow_dispatch' && inputs.period == 'daily')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate daily report
+        run: |
+          curl -fsS --max-time 180 --retry 2 --retry-delay 30 "${{ secrets.REPORT_URL_DAILY }}"
+
+  weekly:
+    if: github.event.schedule == '0 13 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.period == 'weekly')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate weekly report
+        run: |
+          curl -fsS --max-time 180 --retry 2 --retry-delay 30 "${{ secrets.REPORT_URL_WEEKLY }}"

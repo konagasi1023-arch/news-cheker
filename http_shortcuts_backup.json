@@ -1,0 +1,43 @@
+{
+  "version": 3,
+  "shortcuts": [
+    {
+      "id": "news_cheker_url",
+      "name": "News Cheker",
+      "description": "URLをNotionに保存",
+      "iconName": "flat_bookmark",
+      "method": "POST",
+      "url": "https://news-cheker.onrender.com/webhook",
+      "contentType": "application/json",
+      "bodyContent": "{\"url\": \"{url}\"}",
+      "timeout": 120000,
+      "feedbackType": "toast",
+      "successMessage": "Notionに保存しました",
+      "responseHandling": {
+        "successOutput": "message",
+        "failureOutput": "detailed",
+        "successMessage": "Notionに保存しました"
+      }
+    }
+  ],
+  "categories": [
+    {
+      "id": "default",
+      "name": "Shortcuts",
+      "shortcutIds": ["news_cheker_url"]
+    }
+  ],
+  "variables": [
+    {
+      "id": "var_url",
+      "key": "url",
+      "type": "text",
+      "title": "URL",
+      "isSharedText": true,
+      "shareSupport": "text",
+      "rememberValue": false,
+      "urlEncode": false,
+      "jsonEncode": false
+    }
+  ]
+}
