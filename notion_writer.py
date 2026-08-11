@@ -102,8 +102,9 @@ def build_properties(url: str, title: str, category: str = "", tags: list = None
     """ページのプロパティ辞書を組み立てる（新規作成・更新で共用）"""
     props = {
         "名前": {"title": [{"type": "text", "text": {"content": title[:500]}}]},
-        "URL": {"url": url},
     }
+    if url:
+        props["URL"] = {"url": url}
     if category:
         props[CATEGORY_PROPERTY] = {"select": {"name": category}}
     if tags:

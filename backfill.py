@@ -27,8 +27,9 @@ import notion_writer
 
 PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "progress.json")
 
-# Gemini 無料枠のレート制限（毎分あたりの回数）に触れないための待機秒数
-SLEEP_BETWEEN = 5
+# レート制限に触れないための待機秒数。
+# 分類は flash-lite（flash とは別クォータ）を使うため短くて足りる。
+SLEEP_BETWEEN = 2
 
 
 def load_progress() -> dict:
@@ -113,7 +114,13 @@ def main_backfill(limit: int, dry_run: bool, skip_titles: bool) -> None:
     progress = load_progress()
     done = set(progress["done"])
 
-    targets = [p for p in pages if p["id"] not in done]
+    # レポートページ（URLを持たない）は分類の対象外
+    targets = [
+        p for p in pages
+        if p["id"] not in done
+        and p["url"]
+        and p["category"] != notion_writer.REPORT_CATEGORY
+    ]
     if limit:
         targets = targets[:limit]
 
@@ -126,26 +133,34 @@ def main_backfill(limit: int, dry_run: bool, skip_titles: bool) -> None:
             print(f"  {flag} {p['title'][:60]}")
         return
 
-    stats = {"title_fixed": 0, "classified": 0, "failed": 0}
+    stats = {"title_fixed": 0, "classified": 0, "failed": 0, "skipped": 0}
 
     for i, page in enumerate(targets, 1):
         title, url = page["title"], page["url"]
+        context = ""
 
-        # 1. タイトルがドメイン名のままなら取り直す
+        # 1. タイトルがドメイン名のままなら取り直す（X は oEmbed で本文ごと取れる）
         if not skip_titles and is_missing_title(page):
-            fetched = main.fetch_title(url)
-            if fetched and fetched != title:
-                title = fetched
+            meta = main.fetch_meta(url)
+            context = meta["description"]
+            if meta["title"] and meta["title"] != title:
+                title = meta["title"]
                 stats["title_fixed"] += 1
 
         # 2. 分類する
-        result = gemini_client.classify(title, url)
-        if not result["ok"]:
-            # 無料枠を使い切った状態で続けても「その他」を量産するだけなので中断する。
-            # 進捗は保存済みなので、翌日そのまま再実行すれば続きから処理される。
-            print("\n分類に失敗したため中断します（Gemini の割り当てを使い切った可能性）。")
+        result = gemini_client.classify(title, url, context)
+        if result.get("quota_exceeded"):
+            # 割り当て切れの状態で続けても「その他」を量産するだけなので中断する。
+            # 進捗は保存済みなので、時間をおいて再実行すれば続きから処理される。
+            print("\nGemini の割り当てを使い切ったため中断します。")
             print("時間をおいて再実行すると、この続きから処理します。")
             break
+        if not result["ok"]:
+            # 一時的な失敗。この1件は飛ばして次へ進む（後で再実行すれば拾える）
+            stats["skipped"] += 1
+            print(f"[{i}/{len(targets)}] スキップ: {title[:45]}")
+            time.sleep(SLEEP_BETWEEN)
+            continue
         category, tags = result["category"], result["tags"]
 
         # 3. Notion を更新する
@@ -156,6 +171,23 @@ def main_backfill(limit: int, dry_run: bool, skip_titles: bool) -> None:
                 token,
                 {"properties": notion_writer.build_properties(url, title, category, tags)},
             )
+            # 3行要約をページ本文に追記する（既に要約があるページは触らない）
+            if result["summary"]:
+                blocks = notion_writer.notion_request(
+                    "GET", f"/blocks/{page['id']}/children?page_size=5", token)
+                has_summary = any(
+                    b.get("type") == "callout" for b in blocks.get("results", []))
+                if not has_summary:
+                    notion_writer.notion_request(
+                        "PATCH", f"/blocks/{page['id']}/children", token,
+                        {"children": [{
+                            "object": "block", "type": "callout",
+                            "callout": {
+                                "rich_text": [{"type": "text", "text": {
+                                    "content": "\n".join(result["summary"])[:1900]}}],
+                                "icon": {"type": "emoji", "emoji": "📝"},
+                            },
+                        }]})
             stats["classified"] += 1
             done.add(page["id"])
             progress["done"] = list(done)
@@ -170,6 +202,7 @@ def main_backfill(limit: int, dry_run: bool, skip_titles: bool) -> None:
     print(f"\n=== 完了 ===")
     print(f"  分類済み      : {stats['classified']}")
     print(f"  タイトル修復  : {stats['title_fixed']}")
+    print(f"  スキップ      : {stats['skipped']}（再実行で処理されます）")
     print(f"  失敗          : {stats['failed']}")
 
 

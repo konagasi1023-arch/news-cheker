@@ -273,7 +273,8 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         ok が False のときは分類できずフォールバックした状態を示す。
         呼び出し側はこれを見て「分類済み」として記録しないよう判断できる。
     """
-    fallback = {"category": FALLBACK_CATEGORY, "tags": [], "summary": [], "ok": False}
+    fallback = {"category": FALLBACK_CATEGORY, "tags": [], "summary": [],
+                "ok": False, "quota_exceeded": False}
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key or not title:
@@ -313,8 +314,13 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
                 time.sleep(5 * (attempt + 1))
                 continue
             print(f"[classify] HTTP {e.code}: {title[:40]}")
-            return fallback
+            # 429 は割り当て切れ。呼び出し側が処理を止められるよう区別する
+            return {**fallback, "quota_exceeded": e.code == 429}
         except Exception as e:
+            # タイムアウト等の一時的な失敗はリトライする
+            if attempt < 2:
+                time.sleep(2)
+                continue
             print(f"[classify] {type(e).__name__}: {title[:40]}")
             return fallback
 
@@ -338,7 +344,8 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         if isinstance(s, str) and s.strip()
     ][:3]
 
-    return {"category": category, "tags": tags[:MAX_TAGS], "summary": summary, "ok": True}
+    return {"category": category, "tags": tags[:MAX_TAGS], "summary": summary,
+            "ok": True, "quota_exceeded": False}
 
 
 # ---------------------------------------------------------------------------
