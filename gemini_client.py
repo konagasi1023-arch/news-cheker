@@ -352,27 +352,62 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
 # 日次・週次レポート生成
 # ---------------------------------------------------------------------------
 
-REPORT_PROMPT = """あなたは優秀なニュース編集者です。
-以下は読者が{label}に保存した記事の一覧です（タイトル・カテゴリ・タグ・要約）。
+REPORT_PROMPT = """あなたは、専門分野に精通したニュース解説者です。
+以下は、ある読者が{label}保存した記事の一覧です（タイトル・カテゴリ・タグ・要約）。
 
 {articles}
 
-この読者のために、次の構成で「{label}のふりかえりレポート」を日本語で書いてください。
-音声読み上げ（NotebookLM等）でも聴きやすいよう、見出し以外は自然な文章体にすること。
+この読者に向けて「{label}のニュース解説」を日本語で書いてください。
+読者はこれを**音声で聴きます**。そのため次の点を必ず守ってください。
 
-# 概況
-（今回の保存傾向を2〜3文で。何に関心が向いていたか）
+■ 音声で聴くための書き方
+・箇条書きや記号（・、-、＊、#）は一切使わず、すべて自然な話し言葉の文章で書く
+・見出しを記号で作らない。話題の区切りは「ここからは○○の話題です」と文章で示す
+・「まず」「次に」「ここで重要なのは」など、耳で構造がわかる接続表現を使う
+・URLや記号の羅列は読み上げると意味不明になるので書かない
+・数字は「62.7パーセント」のように読み下す
 
-# カテゴリ別ハイライト
-（保存が多かったカテゴリごとに、まとめて2〜3文で紹介。件数が少ないカテゴリは省略可）
+■ 内容の深さ（最重要）
+一覧をなぞるだけの紹介では不十分です。**記事ごとに中身を掘り下げてください。**
+各記事について、わかる範囲で次を語ること。
+　1. 何が起きたのか・何が書かれているのか（具体的に）
+　2. その背景にある文脈（なぜ今この話が出てきたのか）
+　3. これがどういう意味を持つのか、読者にとっての示唆
 
-# 特に注目すべき3件
-（重要度の高い記事を3つ選び、それぞれ「なぜ今これが重要か」を2〜3文で解説）
+検索機能を使って、各記事の背景・関連情報・その後の動きを補ってください。
+ただし、確認できた事実と推測は明確に区別し、
+推測を述べるときは「〜と考えられます」「〜の可能性があります」と表現すること。
+事実を創作してはいけません。情報が乏しい記事は、無理に膨らませず短く触れるだけでよい。
 
-# 明日へのアクション
-（この読者が次に取るべき具体的な行動を1〜2点）
+■ 構成
+最初に、今日の全体像を2〜3文で述べてください。
+次に、カテゴリごとに区切って、そのカテゴリの記事を1件ずつ順番に解説してください。
+（1記事あたり4〜6文を目安に、しっかり中身を語ること）
+カテゴリの切り替わりでは「ここからは○○の話題です」のように口頭で示してください。
+最後に、今日の内容を踏まえて、この読者が次に取るべき行動を2〜3点、文章で述べてください。
 
-与えられた情報にない事実を創作しないこと。"""
+タイトルだけで中身が不明な記事（SNSの投稿など）は、無理に解説せず
+「詳細が不明なため割愛します」と述べて次に進んでください。"""
+
+
+def clean_for_speech(text: str) -> str:
+    """
+    読み上げの妨げになる記号を取り除く。
+    プロンプトで禁じても Markdown 記法が残ることがあるため、出力側で確実に消す。
+    """
+    lines = []
+    for line in text.split("\n"):
+        # 見出しの # は読み上げると雑音になるので落とす（内容は残す）
+        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
+        # 箇条書きの行頭記号を除去
+        line = re.sub(r"^\s*[・\-\*\+]\s*", "", line)
+        # 強調の ** や * を除去
+        line = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", line)
+        lines.append(line.rstrip())
+
+    # 空行が続きすぎないようにまとめる
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+    return out.strip()
 
 
 def generate_report(articles: list, label: str) -> str:
@@ -402,26 +437,31 @@ def generate_report(articles: list, label: str) -> str:
             lines.append(f"    {s}")
 
     prompt = REPORT_PROMPT.format(label=label, articles="\n".join(lines)[:30000])
-    payload = {
+    base_payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 8000},
+        # 記事ごとに掘り下げるため長い出力になる。思考トークン分も見込む
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 32000},
     }
-    body = json.dumps(payload).encode("utf-8")
 
-    # 品質優先で flash を使い、無料枠切れ（429等）なら軽量モデルへフォールバック
+    # 品質優先で flash（検索で背景を補完できる）を使い、
+    # 無料枠切れ（429等）なら軽量モデルへフォールバックする
     last_error = None
-    for model in (GEMINI_MODEL, CLASSIFY_MODEL):
+    for model, use_search in ((GEMINI_MODEL, True), (CLASSIFY_MODEL, False)):
+        payload = dict(base_payload)
+        if use_search:
+            payload["tools"] = [{"google_search": {}}]
         req = urllib.request.Request(
             f"{GEMINI_API_BASE}/{model}:generateContent?key={api_key}",
-            data=body, headers={"Content-Type": "application/json"}, method="POST",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
             parts_out = result["candidates"][0]["content"]["parts"]
             text = "".join(p.get("text", "") for p in parts_out)
             if text.strip():
-                return text.strip()
+                return clean_for_speech(text)
             last_error = RuntimeError(f"{model}: empty response")
         except Exception as e:
             last_error = e
