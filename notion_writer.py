@@ -166,8 +166,9 @@ def fetch_recent_articles(token: str, database_id: str, days: int) -> list:
     直近 days 日に保存された記事（レポートを除く）を取得する。
     各記事のページ本文から3行要約も読み取って返す。
     """
+    # days=1 なら今日の分だけ、days=7 なら今日を含む7日分（暦日で数える）
     from datetime import timedelta
-    since = (datetime.now(JST) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00+09:00")
+    since = (datetime.now(JST) - timedelta(days=days - 1)).strftime("%Y-%m-%dT00:00:00+09:00")
 
     articles = []
     cursor = None
