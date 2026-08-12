@@ -352,42 +352,56 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
 # 日次・週次レポート生成
 # ---------------------------------------------------------------------------
 
-REPORT_PROMPT = """あなたは、専門分野に精通したニュース解説者です。
-以下は、ある読者が{label}保存した記事の一覧です（タイトル・カテゴリ・タグ・要約）。
+SECTION_PROMPT = """あなたは、専門分野に精通したニュース解説者です。
+以下は、ある読者が{label}保存した「{category}」分野の記事です。
 
 {articles}
 
-この読者に向けて「{label}のニュース解説」を日本語で書いてください。
-読者はこれを**音声で聴きます**。そのため次の点を必ず守ってください。
+この{count}件について、音声で聴くためのニュース解説を日本語で書いてください。
+
+■ 最重要：必ず検索して、記事の中身を具体的に語ること
+手元にあるのはタイトルと短い要約だけで、記事の中身は入っていません。
+そのため**1件ずつ必ず検索して、実際の記事の内容を調べてから書いてください。**
+検索するときは、タイトルに媒体名（Forbes、ケータイWatchなど）を添えると見つかります。
+
+調べた上で、各記事について次を具体的に語ること。
+　1. 何が起きたのか。**固有名詞・数字・日付を必ず含める**
+　　 （「調査によると」ではなく「993人を対象にした調査で、EQ上位層の68パーセントが」のように）
+　　 （「新モデルを発表」ではなく「パラメータ数30Bで、ベンチマークAではGPT-5を12ポイント上回った」のように）
+　2. 記事が指摘している論点や結論。書き手が何を主張しているのか
+　3. その背景と、読者にとっての意味
+
+検索しても内容がわからなかった記事は、憶測で埋めず
+「詳しい内容までは確認できませんでした」と正直に述べて短く切り上げてください。
+事実の創作は絶対にしないこと。推測は「〜と考えられます」と明示すること。
 
 ■ 音声で聴くための書き方
-・箇条書きや記号（・、-、＊、#）は一切使わず、すべて自然な話し言葉の文章で書く
-・見出しを記号で作らない。話題の区切りは「ここからは○○の話題です」と文章で示す
-・「まず」「次に」「ここで重要なのは」など、耳で構造がわかる接続表現を使う
-・URLや記号の羅列は読み上げると意味不明になるので書かない
-・数字は「62.7パーセント」のように読み下す
+箇条書きや記号（・、-、＊、#）は一切使わず、すべて自然な話し言葉の文章で書いてください。
+見出しを記号で作らないこと。数字は「六十八パーセント」のように読み下すこと。
+URLや記号の羅列は書かないこと。
 
-■ 内容の深さ（最重要）
-一覧をなぞるだけの紹介では不十分です。**記事ごとに中身を掘り下げてください。**
-各記事について、わかる範囲で次を語ること。
-　1. 何が起きたのか・何が書かれているのか（具体的に）
-　2. その背景にある文脈（なぜ今この話が出てきたのか）
-　3. これがどういう意味を持つのか、読者にとっての示唆
+■ 分量と構成
+冒頭に「ここからは{category}の話題です。」と書き、続けて記事を1件ずつ解説してください。
+**1記事あたり6文から10文**、しっかり中身を語ること。薄い紹介で終わらせないこと。
+全体のまとめや次のアクションは書かないこと（別のパートで扱います）。"""
 
-検索機能を使って、各記事の背景・関連情報・その後の動きを補ってください。
-ただし、確認できた事実と推測は明確に区別し、
-推測を述べるときは「〜と考えられます」「〜の可能性があります」と表現すること。
-事実を創作してはいけません。情報が乏しい記事は、無理に膨らませず短く触れるだけでよい。
+OVERVIEW_PROMPT = """以下は、ある読者が{label}保存した{count}件の記事の一覧です。
 
-■ 構成
-最初に、今日の全体像を2〜3文で述べてください。
-次に、カテゴリごとに区切って、そのカテゴリの記事を1件ずつ順番に解説してください。
-（1記事あたり4〜6文を目安に、しっかり中身を語ること）
-カテゴリの切り替わりでは「ここからは○○の話題です」のように口頭で示してください。
-最後に、今日の内容を踏まえて、この読者が次に取るべき行動を2〜3点、文章で述べてください。
+{articles}
 
-タイトルだけで中身が不明な記事（SNSの投稿など）は、無理に解説せず
-「詳細が不明なため割愛します」と述べて次に進んでください。"""
+この読者に向けて、音声で聴くニュース解説の「導入部分」を日本語で書いてください。
+箇条書きや記号は使わず、自然な話し言葉で3文から4文にまとめること。
+今日はどんな話題が多かったのか、そこから何が読み取れるのかを述べてください。
+個別の記事の詳細には立ち入らないこと（このあと1件ずつ解説します）。"""
+
+CLOSING_PROMPT = """以下は、ある読者が{label}保存した{count}件の記事の一覧です。
+
+{articles}
+
+この読者に向けて、音声で聴くニュース解説の「締めくくり」を日本語で書いてください。
+箇条書きや記号は使わず、自然な話し言葉で書くこと。
+まず今日の内容全体を2文から3文で振り返り、
+続けてこの読者が次に取るべき行動を2つか3つ、文章の形で述べてください。"""
 
 
 def clean_for_speech(text: str) -> str:
@@ -410,61 +424,109 @@ def clean_for_speech(text: str) -> str:
     return out.strip()
 
 
+def _format_articles(articles: list) -> str:
+    """記事リストをプロンプトに埋め込む形に整える"""
+    lines = []
+    for a in articles:
+        lines.append(f"「{a.get('title', '')[:120]}」")
+        if a.get("tags"):
+            lines.append(f"    タグ: {' / '.join(a['tags'][:4])}")
+        for s in (a.get("summary") or [])[:3]:
+            lines.append(f"    要約: {s}")
+    return "\n".join(lines)
+
+
+def _call_gemini(prompt: str, api_key: str, use_search: bool, max_tokens: int) -> str:
+    """
+    Gemini を1回呼ぶ。flash が枠切れなら軽量モデルへフォールバックする。
+    （検索は flash でしか使えないため、フォールバック時は検索なしになる）
+    """
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": max_tokens},
+    }
+    if use_search:
+        payload["tools"] = [{"google_search": {}}]
+    body = json.dumps(payload).encode("utf-8")
+
+    last_error = None
+    for model in (GEMINI_MODEL, CLASSIFY_MODEL):
+        if model == CLASSIFY_MODEL:
+            # 軽量モデルは検索非対応なので外す
+            payload.pop("tools", None)
+            body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{GEMINI_API_BASE}/{model}:generateContent?key={api_key}",
+            data=body, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            parts_out = result["candidates"][0]["content"].get("parts", [])
+            text = "".join(p.get("text", "") for p in parts_out)
+            if text.strip():
+                return text
+            last_error = RuntimeError(
+                f"{model}: empty ({result['candidates'][0].get('finishReason')})")
+        except Exception as e:
+            last_error = e
+    raise RuntimeError(str(last_error))
+
+
 def generate_report(articles: list, label: str) -> str:
     """
     記事リストからふりかえりレポートを生成する。
+
+    カテゴリごとに分けて生成する。1回で全件を書かせると1記事あたりの分量が
+    足りず、タイトルをなぞるだけの内容になってしまうため。
 
     Args:
         articles: [{"title": str, "category": str, "tags": list, "summary": list}, ...]
         label: "今日" "今週" など期間を表す語
 
     Returns:
-        レポート本文（Markdown風テキスト）。失敗時は RuntimeError。
+        レポート本文。失敗時は RuntimeError。
     """
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY が設定されていません")
 
-    lines = []
+    all_text = _format_articles(articles)[:20000]
+    sections = []
+
+    # 導入
+    try:
+        sections.append(_call_gemini(
+            OVERVIEW_PROMPT.format(label=label, count=len(articles), articles=all_text),
+            api_key, use_search=False, max_tokens=4000))
+    except Exception as e:
+        print(f"[report] 導入の生成に失敗: {e}")
+
+    # カテゴリごとの本編（件数が多い順に扱う）
+    by_category = {}
     for a in articles:
-        parts = [f"・「{a.get('title', '')[:100]}」"]
-        if a.get("category"):
-            parts.append(f"[{a['category']}]")
-        if a.get("tags"):
-            parts.append("タグ: " + " / ".join(a["tags"][:4]))
-        lines.append(" ".join(parts))
-        for s in (a.get("summary") or [])[:3]:
-            lines.append(f"    {s}")
+        by_category.setdefault(a.get("category") or "その他", []).append(a)
 
-    prompt = REPORT_PROMPT.format(label=label, articles="\n".join(lines)[:30000])
-    base_payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        # 記事ごとに掘り下げるため長い出力になる。思考トークン分も見込む
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 32000},
-    }
-
-    # 品質優先で flash（検索で背景を補完できる）を使い、
-    # 無料枠切れ（429等）なら軽量モデルへフォールバックする
-    last_error = None
-    for model, use_search in ((GEMINI_MODEL, True), (CLASSIFY_MODEL, False)):
-        payload = dict(base_payload)
-        if use_search:
-            payload["tools"] = [{"google_search": {}}]
-        req = urllib.request.Request(
-            f"{GEMINI_API_BASE}/{model}:generateContent?key={api_key}",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
+    for category, items in sorted(by_category.items(), key=lambda kv: -len(kv[1])):
         try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-            parts_out = result["candidates"][0]["content"]["parts"]
-            text = "".join(p.get("text", "") for p in parts_out)
-            if text.strip():
-                return clean_for_speech(text)
-            last_error = RuntimeError(f"{model}: empty response")
+            sections.append(_call_gemini(
+                SECTION_PROMPT.format(
+                    label=label, category=category, count=len(items),
+                    articles=_format_articles(items)[:12000]),
+                api_key, use_search=True, max_tokens=32000))
+            print(f"[report] {category}: {len(items)}件 完了")
         except Exception as e:
-            last_error = e
-            continue
+            print(f"[report] {category} の生成に失敗（この分野は飛ばします）: {e}")
 
-    raise RuntimeError(f"レポート生成に失敗しました: {last_error}")
+    if not sections:
+        raise RuntimeError("レポートを生成できませんでした")
+
+    # 締めくくり
+    try:
+        sections.append(_call_gemini(
+            CLOSING_PROMPT.format(label=label, count=len(articles), articles=all_text),
+            api_key, use_search=False, max_tokens=4000))
+    except Exception as e:
+        print(f"[report] 締めの生成に失敗: {e}")
+
+    return clean_for_speech("\n\n".join(sections))
