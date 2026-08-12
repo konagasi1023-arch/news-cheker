@@ -214,7 +214,14 @@ def analyze(payload: dict) -> dict:
 
 # 分類・要約は flash とは別クォータの軽量モデルを使う。
 # （flash の無料枠は1日20回と少なく、記事ごとの呼び出しには不向きなため）
-CLASSIFY_MODEL = "gemini-3.5-flash-lite"
+# 無料枠はモデルごとに別勘定なので、使い切ったら次のモデルへ回す。
+# 実測値（2026-08-12）: flash-lite は1日500回、flash は1日20回。
+CLASSIFY_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash-lite",
+]
+CLASSIFY_MODEL = CLASSIFY_MODELS[0]
 
 # 実際に保存済みの記事363件を集計して決めたカテゴリ。
 # AI関連が全体の約6割を占めるため、AIは用途で3分割している。
@@ -295,37 +302,45 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         },
     }
     body = json.dumps(payload).encode("utf-8")
-    url_ = f"{GEMINI_API_BASE}/{CLASSIFY_MODEL}:generateContent?key={api_key}"
 
-    # 無料枠はレート制限に触れやすいため、429 のときだけ間を空けて再試行する
+    # 無料枠はモデルごとに別勘定なので、429 が続くモデルは諦めて次のモデルに移る
     data = None
-    for attempt in range(3):
-        req = urllib.request.Request(
-            url_, data=body, headers={"Content-Type": "application/json"}, method="POST"
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-            parts = result["candidates"][0]["content"]["parts"]
-            data = json.loads("".join(p.get("text", "") for p in parts))
+    exhausted = 0
+    for model in CLASSIFY_MODELS:
+        url_ = f"{GEMINI_API_BASE}/{model}:generateContent?key={api_key}"
+        for attempt in range(3):
+            req = urllib.request.Request(
+                url_, data=body, headers={"Content-Type": "application/json"},
+                method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                parts = result["candidates"][0]["content"]["parts"]
+                data = json.loads("".join(p.get("text", "") for p in parts))
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    # レート制限なら少し待てば通る。日次上限なら待っても無駄
+                    if attempt < 1:
+                        time.sleep(5)
+                        continue
+                    exhausted += 1
+                    break
+                print(f"[classify] HTTP {e.code}: {title[:40]}")
+                return fallback
+            except Exception as e:
+                # タイムアウト等の一時的な失敗はリトライする
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                print(f"[classify] {type(e).__name__}: {title[:40]}")
+                return fallback
+        if data is not None:
             break
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 2:
-                time.sleep(5 * (attempt + 1))
-                continue
-            print(f"[classify] HTTP {e.code}: {title[:40]}")
-            # 429 は割り当て切れ。呼び出し側が処理を止められるよう区別する
-            return {**fallback, "quota_exceeded": e.code == 429}
-        except Exception as e:
-            # タイムアウト等の一時的な失敗はリトライする
-            if attempt < 2:
-                time.sleep(2)
-                continue
-            print(f"[classify] {type(e).__name__}: {title[:40]}")
-            return fallback
 
     if data is None:
-        return fallback
+        # 全モデルが割り当て切れなら、呼び出し側が処理を止められるようにする
+        return {**fallback, "quota_exceeded": exhausted == len(CLASSIFY_MODELS)}
 
     category = data.get("category", "")
     if category not in CATEGORIES:
@@ -455,8 +470,8 @@ def _call_gemini(prompt: str, api_key: str, use_search: bool, max_tokens: int) -
     body = json.dumps(payload).encode("utf-8")
 
     last_error = None
-    for model in (GEMINI_MODEL, CLASSIFY_MODEL):
-        if model == CLASSIFY_MODEL:
+    for model in [GEMINI_MODEL] + CLASSIFY_MODELS:
+        if model != GEMINI_MODEL:
             # 軽量モデルは検索非対応なので外す
             payload.pop("tools", None)
             body = json.dumps(payload).encode("utf-8")

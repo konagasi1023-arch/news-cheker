@@ -72,20 +72,22 @@ def fetch_all_pages(token: str, database_id: str) -> list:
 
 
 def update_page_blocks(token: str, page_id: str, summary: list, excerpt: str) -> None:
-    """要約コールアウトを書き換え（無ければ追加）、抜粋段落を追加する"""
+    """
+    要約コールアウトを書き換え、本文抜粋を入れ直す。
+
+    抜粋は「追加」ではなく「置き換え」にする。抽出方法を直して再実行したとき、
+    古い抜粋が残ったままにならないようにするため。
+    """
     blocks = notion_writer.notion_request(
-        "GET", f"/blocks/{page_id}/children?page_size=10", token)
+        "GET", f"/blocks/{page_id}/children?page_size=50", token)
 
     callout_id = None
-    has_paragraph = False
+    old_paragraphs = []
     for blk in blocks.get("results", []):
         if blk.get("type") == "callout" and callout_id is None:
             callout_id = blk["id"]
         elif blk.get("type") == "paragraph":
-            text = "".join(r.get("plain_text", "")
-                           for r in blk["paragraph"].get("rich_text", []))
-            if text.strip():
-                has_paragraph = True
+            old_paragraphs.append(blk["id"])
 
     # 要約コールアウト
     if summary:
@@ -100,8 +102,13 @@ def update_page_blocks(token: str, page_id: str, summary: list, excerpt: str) ->
                 "PATCH", f"/blocks/{page_id}/children", token,
                 {"children": notion_writer.build_excerpt_blocks(summary, "")})
 
-    # 本文抜粋（既に段落があるページには足さない）
-    if excerpt and not has_paragraph:
+    # 本文抜粋を入れ替える
+    if excerpt:
+        for block_id in old_paragraphs:
+            try:
+                notion_writer.notion_request("DELETE", f"/blocks/{block_id}", token)
+            except Exception:
+                pass  # 消せなくても新しい抜粋の追加は続ける
         notion_writer.notion_request(
             "PATCH", f"/blocks/{page_id}/children", token,
             {"children": notion_writer.build_excerpt_blocks(None, excerpt)})
