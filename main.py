@@ -40,6 +40,7 @@ def _make_png(width: int, height: int, r: int, g: int, b: int) -> bytes:
 import html as html_module
 import urllib.request
 import urllib.parse
+from html.parser import HTMLParser
 import notion_writer
 import gemini_client
 
@@ -80,69 +81,271 @@ def fetch_x_post(url: str) -> dict:
 
 
 def _extract_meta(html: str, prop_patterns: list) -> str:
-    """メタタグの content を取得する（属性順が逆のパターンにも対応）"""
+    """
+    メタタグの content を取得する。
+    属性の順序が逆のパターンと、引用符の無い属性値（Forbes など）にも対応する。
+    """
+    # 引用符あり / 無し（次の属性の直前まで）の両方を拾う
+    value = r'(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))'
     for attr, name in prop_patterns:
-        m = re.search(
-            rf'<meta[^>]+{attr}=["\']{name}["\'][^>]+content=["\']([^"\']+)["\']',
-            html, re.IGNORECASE)
-        if not m:
-            m = re.search(
-                rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+{attr}=["\']{name}["\']',
-                html, re.IGNORECASE)
-        if m:
-            return m.group(1)
+        for pattern in (
+            rf'<meta[^>]+{attr}=["\']?{re.escape(name)}["\']?[^>]*?content={value}',
+            rf'<meta[^>]+content={value}[^>]*?{attr}=["\']?{re.escape(name)}["\']?',
+        ):
+            m = re.search(pattern, html, re.IGNORECASE)
+            if m:
+                found = next((g for g in m.groups() if g), "")
+                if found:
+                    return found
     return ""
 
 
-def fetch_meta(url: str) -> dict:
-    """
-    URL からタイトルと本文抜粋（description）を取得する。
-    X のポストは oEmbed で本文ごと取得する。
-
-    Returns:
-        {"title": str, "description": str}（失敗時はどちらも空文字）
-    """
-    x_post = fetch_x_post(url)
-    if x_post:
-        return x_post
-
-    empty = {"title": "", "description": ""}
+def _download_html(url: str, max_bytes: int = 400000, timeout: int = 12) -> str:
+    """URL の HTML を charset を考慮して取得する。失敗時は空文字"""
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
         })
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            # charsetをレスポンスヘッダーから取得
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             content_type = resp.headers.get("Content-Type", "")
             charset_match = re.search(r"charset=([\w-]+)", content_type)
             charset = charset_match.group(1) if charset_match else None
-            raw = resp.read(65536)
+            raw = resp.read(max_bytes)
 
-        # charsetがヘッダーにない場合はmetaタグから取得
         if not charset:
             meta_match = re.search(
-                rb'<meta[^>]+charset=["\']?([\w-]+)', raw, re.IGNORECASE
-            )
+                rb'<meta[^>]+charset=["\']?([\w-]+)', raw, re.IGNORECASE)
             charset = meta_match.group(1).decode("ascii", errors="ignore") if meta_match else "utf-8"
 
-        html = raw.decode(charset, errors="ignore")
-
-        # OGタグ → twitter:title → titleタグの順で取得
-        raw_title = _extract_meta(html, [
-            ("property", "og:title"), ("name", "twitter:title")])
-        if not raw_title:
-            title_match = re.search(
-                r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-            raw_title = title_match.group(1) if title_match else ""
-
-        description = _extract_meta(html, [
-            ("property", "og:description"), ("name", "description")])
-
-        title = re.sub(r"\s+", " ", html_module.unescape(raw_title.strip())).strip()
-        description = html_module.unescape(description.strip())
-        return {"title": title, "description": description[:1000]}
+        return raw.decode(charset, errors="ignore")
     except Exception:
-        return empty
+        return ""
+
+
+SMARTNEWS_HOST_RE = re.compile(r"https?://(?:www\.|l\.)?smartnews\.com/")
+
+
+def resolve_smartnews(url: str) -> dict:
+    """
+    SmartNews の記事ページから元記事の情報を取り出す。
+
+    SmartNews のページは JS 描画で本文を持たないが、SSR された HTML に
+    linkData（元記事URL・媒体名・著者）が JS オブジェクトとして埋まっている。
+
+    Returns:
+        {"url": 元記事URL, "site": 媒体名, "author": 著者名} / 見つからなければ None
+    """
+    if not SMARTNEWS_HOST_RE.match(url):
+        return None
+    html = _download_html(url, max_bytes=200000)
+    if not html:
+        return None
+
+    m = re.search(r'linkData:\{[^{}]*?url:"(https?://[^"]+)"', html)
+    if not m:
+        return None
+    site = re.search(r'site:\{name:"([^"]+)"', html)
+    author = re.search(r'author:\{name:"([^"]+)"', html)
+    return {
+        "url": m.group(1),
+        "site": site.group(1) if site else "",
+        "author": author.group(1) if author else "",
+    }
+
+
+class _ArticleParser(HTMLParser):
+    """
+    段落テキストを、それが属するブロック要素ごとに集めるパーサー。
+
+    ページ全体の <p> をまとめて拾うと、関連記事リンクやサイドバーが
+    本文に混ざってしまう。本文は特定のコンテナに固まっているので、
+    「配下の段落テキストが最も多いコンテナ」を本文とみなす。
+    """
+
+    # 本文が入りうるコンテナ
+    CONTAINERS = {"div", "section", "article", "main", "td"}
+    # 中身を捨てる要素
+    SKIP = {"script", "style", "nav", "header", "footer", "aside", "form",
+            "figure", "figcaption", "noscript", "select", "button"}
+    # 段落として扱う要素
+    BLOCKS = {"p", "h2", "h3", "h4", "li", "blockquote", "dd"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []          # 開いているコンテナの id
+        self.blocks = {}         # コンテナ id -> [直下の段落テキスト]
+        self.scores = {}         # コンテナ id -> 本文らしさのスコア
+        self.children = {}       # コンテナ id -> [子コンテナ id]
+        self.counter = 0
+        self.skip_depth = 0
+        self.current = None      # 収集中の段落テキスト
+        self.link_chars = {}     # コンテナ id -> リンク内の文字数
+        self.in_link = False
+
+    def _flush(self):
+        """収集中の段落を確定させる（</p> が省略された HTML にも対応するため）"""
+        if self.current is None:
+            return
+        text = re.sub(r"\s+", " ", "".join(self.current)).strip()
+        self.current = None
+        # 短い行は見出しナビやクレジットのことが多い
+        if len(text) < 25 or not self.stack:
+            return
+        # 段落は直近のコンテナに入れる。ただし本文が段落ごとに div で
+        # 包まれている場合に備え、祖先にもスコアを配分する
+        # （近いほど高く。readability と同じ考え方）
+        self.blocks[self.stack[-1]].append(text)
+        for depth, cid in enumerate(reversed(self.stack)):
+            self.scores[cid] = self.scores.get(cid, 0) + len(text) / (depth + 1)
+            if depth >= 4:
+                break
+
+    def handle_starttag(self, tag, attrs):
+        # スキップ対象の入れ子だけを数える（他のタグでは増やさない）
+        if tag in self.SKIP:
+            self._flush()
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if tag in self.CONTAINERS:
+            self._flush()
+            self.counter += 1
+            if self.stack:
+                self.children.setdefault(self.stack[-1], []).append(self.counter)
+            self.stack.append(self.counter)
+            self.blocks[self.counter] = []
+            self.link_chars[self.counter] = 0
+        elif tag in self.BLOCKS:
+            self._flush()
+            self.current = []
+        elif tag == "a":
+            self.in_link = True
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP:
+            self.skip_depth = max(0, self.skip_depth - 1)
+            return
+        if self.skip_depth:
+            return
+        if tag in self.CONTAINERS:
+            self._flush()
+            if self.stack:
+                self.stack.pop()
+        elif tag in self.BLOCKS:
+            self._flush()
+        elif tag == "a":
+            self.in_link = False
+
+    def handle_data(self, data):
+        if self.skip_depth or self.current is None:
+            return
+        self.current.append(data)
+        if self.in_link and self.stack:
+            self.link_chars[self.stack[-1]] += len(data.strip())
+
+    def _collect(self, cid: int) -> list:
+        """コンテナ配下の段落を出現順に集める"""
+        texts = list(self.blocks.get(cid, []))
+        for child in self.children.get(cid, []):
+            texts.extend(self._collect(child))
+        return texts
+
+    def _link_chars_deep(self, cid: int) -> int:
+        """コンテナ配下のリンク文字数を合計する"""
+        total = self.link_chars.get(cid, 0)
+        for child in self.children.get(cid, []):
+            total += self._link_chars_deep(child)
+        return total
+
+    def best_text(self) -> str:
+        """本文らしさが最も高いコンテナのテキストを返す"""
+        best, best_score = "", 0.0
+        for cid, score in self.scores.items():
+            texts = self._collect(cid)
+            total = sum(len(t) for t in texts)
+            if total < 200:
+                continue
+            # リンクだらけのコンテナは関連記事一覧なので減点する
+            link_ratio = self._link_chars_deep(cid) / max(total, 1)
+            adjusted = score * (1 - min(link_ratio, 1.0))
+            if adjusted > best_score:
+                best_score, best = adjusted, "\n".join(texts)
+        return best
+
+
+def extract_article_body(html: str) -> str:
+    """
+    記事ページの HTML から本文テキストを抽出する。
+    JSON-LD の articleBody があればそれを使い、無ければ本文密度で判定する。
+    """
+    # 1. JSON-LD の articleBody（最も正確）
+    for m in re.finditer(
+            r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>',
+            html, re.DOTALL | re.IGNORECASE):
+        try:
+            data = json.loads(m.group(1).strip())
+        except Exception:
+            continue
+        for item in (data if isinstance(data, list) else [data]):
+            if isinstance(item, dict):
+                body = item.get("articleBody")
+                if isinstance(body, str) and len(body) > 200:
+                    return re.sub(r"\s+", " ", html_module.unescape(body)).strip()
+
+    # 2. 本文密度で判定する
+    try:
+        parser = _ArticleParser()
+        parser.feed(html)
+        return parser.best_text()
+    except Exception:
+        return ""
+
+
+def fetch_meta(url: str) -> dict:
+    """
+    URL からタイトル・本文抜粋・本文を取得する。
+    X のポストは oEmbed、SmartNews は元記事を解決してから本文を取る。
+
+    Returns:
+        {"title", "description", "body", "original_url", "site"}
+        （取れなかった項目は空文字）
+    """
+    empty = {"title": "", "description": "", "body": "", "original_url": "", "site": ""}
+
+    x_post = fetch_x_post(url)
+    if x_post:
+        return {**empty, **x_post, "body": x_post["description"]}
+
+    # SmartNews は元記事に差し替えて取得する
+    original_url, site = "", ""
+    target = url
+    sn = resolve_smartnews(url)
+    if sn:
+        target = original_url = sn["url"]
+        site = sn["site"]
+
+    html = _download_html(target)
+    if not html:
+        return {**empty, "original_url": original_url, "site": site}
+
+    # OGタグ → twitter:title → titleタグの順で取得
+    raw_title = _extract_meta(html, [
+        ("property", "og:title"), ("name", "twitter:title")])
+    if not raw_title:
+        title_match = re.search(
+            r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        raw_title = title_match.group(1) if title_match else ""
+
+    description = _extract_meta(html, [
+        ("property", "og:description"), ("name", "description")])
+
+    title = re.sub(r"\s+", " ", html_module.unescape(raw_title.strip())).strip()
+    description = html_module.unescape(description.strip())
+    body = extract_article_body(html)
+
+    return {"title": title, "description": description[:1000],
+            "body": body, "original_url": original_url, "site": site}
 
 
 def fetch_title(url: str) -> str:
@@ -316,10 +519,11 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
         return {"duplicate": True, "notion_url": existing, "title": title_hint,
                 "category": "", "tags": [], "summary": []}
 
-    # タイトルと本文抜粋を取得（X は oEmbed でポスト本文ごと取れる）
+    # タイトルと本文を取得（X は oEmbed、SmartNews は元記事を解決して本文まで取る）
     meta = fetch_meta(url)
     title = title_hint or meta["title"] or _fallback_title(url)
-    context = context_hint or meta["description"]
+    # 要約の材料は 本文 > 共有テキスト > description の順に良い
+    context = meta["body"] or context_hint or meta["description"]
 
     # 分類できなかった場合はカテゴリを空のままにしておく。
     # 「その他」と書いてしまうと、後から未分類のページを見分けられなくなるため。
@@ -337,6 +541,7 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
     notion_url = notion_writer.save_to_notion(
         url, title, token, database_id,
         category=category, tags=tags, summary=summary,
+        excerpt=meta["body"], original_url=meta["original_url"],
     )
     return {"duplicate": False, "notion_url": notion_url, "title": title,
             "category": category, "tags": tags, "summary": summary}

@@ -73,9 +73,10 @@ def fetch_pages(token: str, database_id: str, since: str = "") -> list:
 
 def parse_page(pg: dict) -> dict:
     """Notion ページオブジェクトから必要な情報を取り出す"""
-    item = {"id": pg["id"], "title": "", "url": "", "category": "",
-            "tags": [], "date": "", "edited": pg.get("last_edited_time", "")}
-    for val in pg.get("properties", {}).values():
+    item = {"id": pg["id"], "title": "", "url": "", "original_url": "",
+            "category": "", "tags": [], "date": "",
+            "edited": pg.get("last_edited_time", "")}
+    for name, val in pg.get("properties", {}).items():
         kind = val.get("type")
         if kind == "title":
             title = "".join(a.get("plain_text", "") for a in val.get("title", []))
@@ -84,7 +85,10 @@ def parse_page(pg: dict) -> dict:
                 title = title[1:-1].strip()
             item["title"] = title
         elif kind == "url":
-            item["url"] = val.get("url") or ""
+            if name == notion_writer.ORIGINAL_URL_PROPERTY:
+                item["original_url"] = val.get("url") or ""
+            else:
+                item["url"] = val.get("url") or ""
         elif kind == "select":
             item["category"] = (val.get("select") or {}).get("name", "")
         elif kind == "multi_select":
@@ -94,25 +98,33 @@ def parse_page(pg: dict) -> dict:
     return item
 
 
-def fetch_body_text(token: str, page_id: str) -> str:
-    """ページ本文（要約コールアウトやレポート本文）をテキストで取得する"""
-    lines = []
+def fetch_body_text(token: str, page_id: str) -> dict:
+    """
+    ページ本文を取得する。
+    コールアウトは3行要約、段落は本文抜粋（レポートの場合はレポート本文）。
+    """
+    summary, paragraphs = [], []
     try:
         res = notion_writer.notion_request(
             "GET", f"/blocks/{page_id}/children?page_size=100", token)
         for blk in res.get("results", []):
             kind = blk.get("type")
-            if kind in ("paragraph", "callout", "quote", "bulleted_list_item"):
-                text = "".join(
-                    r.get("plain_text", "") for r in blk[kind].get("rich_text", []))
-                if text.strip():
-                    lines.append(text)
+            if kind not in ("paragraph", "callout", "quote", "bulleted_list_item"):
+                continue
+            text = "".join(
+                r.get("plain_text", "") for r in blk[kind].get("rich_text", []))
+            if not text.strip():
+                continue
+            if kind == "callout" and not summary:
+                summary = [l for l in text.split("\n") if l.strip()]
+            else:
+                paragraphs.append(text)
     except Exception:
         pass
-    return "\n\n".join(lines)
+    return {"summary": summary, "excerpt": "\n\n".join(paragraphs)}
 
 
-def build_markdown(item: dict, body: str) -> str:
+def build_markdown(item: dict, body: dict) -> str:
     """frontmatter 付き Markdown を組み立てる"""
     def yaml_escape(s: str) -> str:
         return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -121,6 +133,8 @@ def build_markdown(item: dict, body: str) -> str:
     lines.append(f"title: {yaml_escape(item['title'])}")
     if item["url"]:
         lines.append(f"url: {item['url']}")
+    if item.get("original_url"):
+        lines.append(f"source_url: {item['original_url']}")
     if item["category"]:
         lines.append(f"category: {yaml_escape(item['category'])}")
     if item["tags"]:
@@ -134,11 +148,24 @@ def build_markdown(item: dict, body: str) -> str:
     lines.append("")
     lines.append(f"# {item['title']}")
     lines.append("")
-    if body:
-        lines.append(body)
+
+    if body["summary"]:
+        lines.append("## 要約")
         lines.append("")
-    if item["url"]:
-        lines.append(f"🔗 [元記事]({item['url']})")
+        for s in body["summary"]:
+            lines.append(f"- {s}")
+        lines.append("")
+    if body["excerpt"]:
+        # レポートは要約を持たないので、見出しを付けずそのまま本文にする
+        if body["summary"]:
+            lines.append("## 本文抜粋")
+            lines.append("")
+        lines.append(body["excerpt"])
+        lines.append("")
+
+    link = item.get("original_url") or item["url"]
+    if link:
+        lines.append(f"🔗 [元記事]({link})")
     return "\n".join(lines) + "\n"
 
 

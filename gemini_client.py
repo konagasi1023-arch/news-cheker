@@ -281,7 +281,7 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         return fallback
 
     prompt = CLASSIFY_PROMPT.format(
-        title=title[:300], url=url[:300], context=context[:1500] or "（なし）",
+        title=title[:300], url=url[:300], context=context[:4000] or "（なし）",
         max_tags=MAX_TAGS,
     )
     payload = {
@@ -359,12 +359,13 @@ SECTION_PROMPT = """あなたは、専門分野に精通したニュース解説
 
 この{count}件について、音声で聴くためのニュース解説を日本語で書いてください。
 
-■ 最重要：必ず検索して、記事の中身を具体的に語ること
-手元にあるのはタイトルと短い要約だけで、記事の中身は入っていません。
-そのため**1件ずつ必ず検索して、実際の記事の内容を調べてから書いてください。**
-検索するときは、タイトルに媒体名（Forbes、ケータイWatchなど）を添えると見つかります。
+■ 最重要：本文抜粋に基づいて、記事の中身を具体的に語ること
+各記事には「本文抜粋」が付いています。これが一次情報なので、
+**本文抜粋に書かれている事実を最優先の材料にしてください。**
+本文抜粋が無い、または短い記事に限り、検索で内容を調べて補ってください。
+検索するときは、タイトルに媒体名を添えると見つかります。
 
-調べた上で、各記事について次を具体的に語ること。
+各記事について次を具体的に語ること。
 　1. 何が起きたのか。**固有名詞・数字・日付を必ず含める**
 　　 （「調査によると」ではなく「993人を対象にした調査で、EQ上位層の68パーセントが」のように）
 　　 （「新モデルを発表」ではなく「パラメータ数30Bで、ベンチマークAではGPT-5を12ポイント上回った」のように）
@@ -424,7 +425,7 @@ def clean_for_speech(text: str) -> str:
     return out.strip()
 
 
-def _format_articles(articles: list) -> str:
+def _format_articles(articles: list, with_excerpt: bool = False) -> str:
     """記事リストをプロンプトに埋め込む形に整える"""
     lines = []
     for a in articles:
@@ -433,6 +434,10 @@ def _format_articles(articles: list) -> str:
             lines.append(f"    タグ: {' / '.join(a['tags'][:4])}")
         for s in (a.get("summary") or [])[:3]:
             lines.append(f"    要約: {s}")
+        if with_excerpt and a.get("excerpt"):
+            excerpt = re.sub(r"\s+", " ", a["excerpt"]).strip()[:2500]
+            lines.append(f"    本文抜粋: {excerpt}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -512,7 +517,7 @@ def generate_report(articles: list, label: str) -> str:
             sections.append(_call_gemini(
                 SECTION_PROMPT.format(
                     label=label, category=category, count=len(items),
-                    articles=_format_articles(items)[:12000]),
+                    articles=_format_articles(items, with_excerpt=True)[:40000]),
                 api_key, use_search=True, max_tokens=32000))
             print(f"[report] {category}: {len(items)}件 完了")
         except Exception as e:

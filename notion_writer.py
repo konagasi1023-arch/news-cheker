@@ -50,6 +50,7 @@ def extract_page_id(value: str) -> str:
 
 CATEGORY_PROPERTY = "カテゴリ"
 TAG_PROPERTY = "タグ"
+ORIGINAL_URL_PROPERTY = "元記事URL"
 
 # プロパティ確認は起動後1回で足りるのでプロセス内でキャッシュする
 _properties_checked = False
@@ -57,7 +58,7 @@ _properties_checked = False
 
 def ensure_properties(token: str, database_id: str) -> None:
     """
-    データベースに「カテゴリ」「タグ」プロパティが無ければ追加する。
+    データベースに「カテゴリ」「タグ」「元記事URL」プロパティが無ければ追加する。
 
     select / multi_select のオプションは、ページ作成時に未知の値を渡せば
     Notion 側で自動生成されるため、ここでは入れ物だけ用意する。
@@ -74,6 +75,8 @@ def ensure_properties(token: str, database_id: str) -> None:
         missing[CATEGORY_PROPERTY] = {"select": {}}
     if TAG_PROPERTY not in existing:
         missing[TAG_PROPERTY] = {"multi_select": {}}
+    if ORIGINAL_URL_PROPERTY not in existing:
+        missing[ORIGINAL_URL_PROPERTY] = {"url": {}}
 
     if missing:
         notion_request(
@@ -112,6 +115,37 @@ def build_properties(url: str, title: str, category: str = "", tags: list = None
     return props
 
 
+# 本文抜粋として保存する最大文字数。
+# 著作権に配慮して全文は保存せず、要約・レポートの材料になる範囲に留める
+EXCERPT_LIMIT = 3000
+
+
+def build_excerpt_blocks(summary: list = None, excerpt: str = "") -> list:
+    """ページ本文ブロック（要約コールアウト＋本文抜粋の段落）を組み立てる"""
+    children = []
+    if summary:
+        text = "\n".join(summary)[:1900]
+        children.append({
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": text}}],
+                "icon": {"type": "emoji", "emoji": "📝"},
+            },
+        })
+    if excerpt:
+        body = excerpt[:EXCERPT_LIMIT]
+        # Notion のブロック上限（2000字）に合わせて分割する
+        for i in range(0, len(body), 1900):
+            children.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [
+                    {"type": "text", "text": {"content": body[i:i + 1900]}}]},
+            })
+    return children
+
+
 def save_to_notion(
     url: str,
     title: str,
@@ -120,18 +154,22 @@ def save_to_notion(
     category: str = "",
     tags: list = None,
     summary: list = None,
+    excerpt: str = "",
+    original_url: str = "",
 ) -> str:
     """
-    News Cheker データベースに URL + タイトル + 分類 + 要約を保存する。
+    News Cheker データベースに URL + タイトル + 分類 + 要約 + 本文抜粋を保存する。
 
     Args:
-        url:         保存するURL
-        title:       ページタイトル
-        token:       NOTION_TOKEN
-        database_id: NOTION_DATABASE_ID
-        category:    カテゴリ（省略可）
-        tags:        タグのリスト（省略可）
-        summary:     3行要約（省略可。ページ本文のコールアウトとして書き込む）
+        url:          保存するURL
+        title:        ページタイトル
+        token:        NOTION_TOKEN
+        database_id:  NOTION_DATABASE_ID
+        category:     カテゴリ（省略可）
+        tags:         タグのリスト（省略可）
+        summary:      3行要約（省略可。ページ本文のコールアウトとして書き込む）
+        excerpt:      本文抜粋（省略可。段落ブロックとして書き込む）
+        original_url: 元記事URL（SmartNews等の場合。プロパティに保存）
 
     Returns:
         作成された Notion ページの URL
@@ -140,18 +178,13 @@ def save_to_notion(
     properties["日付"] = {
         "date": {"start": datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S+09:00")}
     }
+    if original_url:
+        properties[ORIGINAL_URL_PROPERTY] = {"url": original_url}
 
     page_data = {"parent": {"database_id": database_id}, "properties": properties}
-    if summary:
-        text = "\n".join(summary)[:1900]
-        page_data["children"] = [{
-            "object": "block",
-            "type": "callout",
-            "callout": {
-                "rich_text": [{"type": "text", "text": {"content": text}}],
-                "icon": {"type": "emoji", "emoji": "📝"},
-            },
-        }]
+    children = build_excerpt_blocks(summary, excerpt)
+    if children:
+        page_data["children"] = children
 
     page = notion_request("POST", "/pages", token, page_data)
     page_id = page["id"].replace("-", "")
@@ -205,18 +238,25 @@ def fetch_recent_articles(token: str, database_id: str, days: int) -> list:
             break
         cursor = res.get("next_cursor")
 
-    # ページ本文のコールアウト（3行要約）を読み取る
+    # ページ本文から3行要約（コールアウト）と本文抜粋（段落）を読み取る
     for item in articles:
+        item["excerpt"] = ""
         try:
             blocks = notion_request(
-                "GET", f"/blocks/{item['id']}/children?page_size=5", token)
+                "GET", f"/blocks/{item['id']}/children?page_size=10", token)
+            paragraphs = []
             for blk in blocks.get("results", []):
-                if blk.get("type") == "callout":
+                kind = blk.get("type")
+                if kind == "callout" and not item["summary"]:
                     text = "".join(
                         r.get("plain_text", "")
                         for r in blk["callout"].get("rich_text", []))
                     item["summary"] = [l for l in text.split("\n") if l.strip()]
-                    break
+                elif kind == "paragraph":
+                    paragraphs.append("".join(
+                        r.get("plain_text", "")
+                        for r in blk["paragraph"].get("rich_text", [])))
+            item["excerpt"] = "\n".join(p for p in paragraphs if p.strip())
         except Exception:
             pass  # 要約が読めなくてもレポートは作れる
 
