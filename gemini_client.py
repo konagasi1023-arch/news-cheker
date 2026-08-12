@@ -217,9 +217,10 @@ def analyze(payload: dict) -> dict:
 # 無料枠はモデルごとに別勘定なので、使い切ったら次のモデルへ回す。
 # 実測値（2026-08-12）: flash-lite は1日500回、flash は1日20回。
 CLASSIFY_MODELS = [
-    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash-lite",         # 1日500回
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview",
     "gemini-3-flash-preview",
-    "gemini-2.5-flash-lite",
 ]
 CLASSIFY_MODEL = CLASSIFY_MODELS[0]
 
@@ -325,6 +326,9 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
                         time.sleep(5)
                         continue
                     exhausted += 1
+                    break
+                # モデル側の問題（404 や 503）は次のモデルで試す
+                if e.code in (404, 500, 503):
                     break
                 print(f"[classify] HTTP {e.code}: {title[:40]}")
                 return fallback
