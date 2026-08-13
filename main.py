@@ -49,35 +49,117 @@ X_STATUS_RE = re.compile(
 )
 
 
-def fetch_x_post(url: str) -> dict:
-    """
-    X（Twitter）のポストを公式 oEmbed API で取得する（認証不要・公開ポストのみ）。
-    取得できたら {"title": "投稿者: 本文冒頭", "description": ポスト全文} を返す。
-    """
-    if not X_STATUS_RE.match(url):
-        return None
-    api = ("https://publish.twitter.com/oembed?omit_script=1&lang=ja&url="
-           + urllib.parse.quote(url, safe=""))
+def _get_json(url: str, timeout: int = 12) -> dict:
+    """JSON を取得する。失敗したら None"""
     try:
-        req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
 
-    author = data.get("author_name", "")
+
+def _x_from_oembed(url: str) -> dict:
+    """X 公式 oEmbed から投稿を取得する（認証不要・公開ポストのみ）"""
+    api = ("https://publish.twitter.com/oembed?omit_script=1&lang=ja&url="
+           + urllib.parse.quote(url, safe=""))
+    data = _get_json(api, timeout=10)
+    if not data:
+        return None
+
     text = ""
     m = re.search(r"<p[^>]*>(.*?)</p>", data.get("html", ""), re.DOTALL)
     if m:
         text = re.sub(r"<br\s*/?>", "\n", m.group(1))
         text = html_module.unescape(re.sub(r"<[^>]+>", "", text)).strip()
 
+    author = data.get("author_name", "")
     if not (author or text):
         return None
+    return {"author": author, "text": text, "links": []}
 
-    first_line = text.split("\n")[0] if text else ""
+
+def _x_from_fxtwitter(status_id: str) -> dict:
+    """
+    fxtwitter から投稿を取得する。
+    公式 oEmbed は長文投稿を 174 字ほどで打ち切るため、全文が要るときに使う。
+    有志運営の無料サービスなので、落ちていても公式の結果で動くようにしておく。
+    """
+    data = _get_json(f"https://api.fxtwitter.com/status/{status_id}", timeout=15)
+    if not data:
+        return None
+    tweet = data.get("tweet") or {}
+    text = (tweet.get("text") or "").strip()
+    if not text:
+        return None
+
+    links = []
+    for key in ("url", "expanded_url"):
+        for item in (tweet.get("media", {}) or {}).get("external", []) or []:
+            if item.get(key):
+                links.append(item[key])
+    return {
+        "author": (tweet.get("author") or {}).get("name", ""),
+        "text": text,
+        "links": links,
+    }
+
+
+def _expand_x_links(text: str) -> list:
+    """投稿本文に含まれる t.co 以外の URL を拾う（記事リンクをたどるため）"""
+    urls = []
+    for u in re.findall(r"https?://[^\s　]+", text):
+        u = u.rstrip("）)、。,")
+        if "//t.co/" in u or "twitter.com" in u or "x.com" in u:
+            continue
+        if u not in urls:
+            urls.append(u)
+    return urls
+
+
+def fetch_x_post(url: str) -> dict:
+    """
+    X（Twitter）のポストを取得する。
+
+    公式 oEmbed を先に試し、長文投稿で打ち切られている場合だけ fxtwitter で全文を取る。
+    投稿が記事へのリンクを含む場合は、その記事の本文も続けて読み込む。
+
+    Returns:
+        {"title": "投稿者: 本文冒頭", "description": 投稿本文（＋リンク先本文）}
+    """
+    m = X_STATUS_RE.match(url)
+    if not m:
+        return None
+    status_id = url.rstrip("/").split("/")[-1].split("?")[0]
+
+    post = _x_from_oembed(url)
+    # 長文投稿は末尾が省略記号か「続きを読む」の t.co リンクになる。
+    # どちらかに当てはまれば全文を取り直す。
+    tail = (post or {}).get("text", "").rstrip()[-60:]
+    truncated = not post or "…" in tail or "..." in tail or "//t.co/" in tail
+    if truncated:
+        full = _x_from_fxtwitter(status_id)
+        if full and len(full["text"]) > len((post or {}).get("text", "")):
+            post = full
+    if not post:
+        return None
+
+    text = post["text"]
+    first_line = next((l for l in text.split("\n") if l.strip()), "")
+    author = post["author"]
     title = f"{author}: {first_line[:60]}" if author else first_line[:80]
-    return {"title": title.strip(" :"), "description": text[:1000]}
+
+    # 投稿が紹介している記事があれば、その本文も材料にする
+    body = text
+    for link in (_expand_x_links(text) + post["links"])[:2]:
+        try:
+            article = extract_article_body(_download_html(link))
+        except Exception:
+            article = ""
+        if article:
+            body += f"\n\n【リンク先記事: {link}】\n{article[:3000]}"
+
+    return {"title": title.strip(" :"), "description": body}
 
 
 def _extract_meta(html: str, prop_patterns: list) -> str:
