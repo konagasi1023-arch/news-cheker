@@ -730,10 +730,12 @@ REPORT_PERIODS = {
 
 
 @app.get("/report/{period}")
-async def generate_report(period: str, token: str = ""):
+async def generate_report(period: str, token: str = "", days: int = 0):
     """
     保存記事のふりかえりレポートを生成して Notion に保存する。
     GitHub Actions 等の定期実行から叩く想定。REPORT_TOKEN で保護する。
+
+    days を指定すると期間を上書きできる（レポートし損ねた日をまとめて拾うとき用）。
     """
     expected = os.environ.get("REPORT_TOKEN", "").strip()
     if not expected:
@@ -743,7 +745,12 @@ async def generate_report(period: str, token: str = ""):
     if period not in REPORT_PERIODS:
         raise HTTPException(status_code=404, detail=f"不明な期間です: {period}")
 
-    days, label, kind = REPORT_PERIODS[period]
+    default_days, label, kind = REPORT_PERIODS[period]
+    if days:
+        if not 1 <= days <= 31:
+            raise HTTPException(status_code=400, detail="days は 1〜31 で指定してください")
+        label = f"この{days}日間に"
+    days = days or default_days
     notion_token, database_id = notion_writer.get_credentials()
 
     articles = notion_writer.fetch_recent_articles(notion_token, database_id, days)
