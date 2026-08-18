@@ -223,11 +223,20 @@ def resolve_smartnews(url: str) -> dict:
     if not html:
         return None
 
-    m = re.search(r'linkData:\{[^{}]*?url:"(https?://[^"]+)"', html)
+    # SmartNews は素の JS オブジェクト（url:"..."）と、
+    # エスケープされた JSON（\"url\":\"...\"）のどちらの形でも埋め込んでくる。
+    # キーの前後に付きうる引用符とバックスラッシュを吸収する。
+    def field(name: str, value: str = r'[^"\\]+') -> str:
+        # キーと値それぞれの前に、エスケープ由来のバックスラッシュが入りうる
+        return rf'\\?"?{name}\\?"?\s*:\s*\\?"({value})'
+
+    m = re.search(
+        rf'linkData\\?"?\s*:\s*\{{.{{0,400}}?{field("url", r"https?://[^\"\\]+")}',
+        html, re.DOTALL)
     if not m:
         return None
-    site = re.search(r'site:\{name:"([^"]+)"', html)
-    author = re.search(r'author:\{name:"([^"]+)"', html)
+    site = re.search(rf'\\?"?site\\?"?\s*:\s*\{{{field("name")}', html)
+    author = re.search(rf'\\?"?author\\?"?\s*:\s*\{{{field("name")}', html)
     return {
         "url": m.group(1),
         "site": site.group(1) if site else "",
