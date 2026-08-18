@@ -401,8 +401,14 @@ SECTION_PROMPT = """あなたは、専門分野に精通したニュース解説
 URLや記号の羅列は書かないこと。
 
 ■ 分量と構成
-冒頭に「ここからは{category}の話題です。」と書き、続けて記事を1件ずつ解説してください。
+冒頭に「ここからは{category}の話題です。この分野は{count}件あります。」と書いてください。
+続けて記事を1件ずつ解説します。**各記事の冒頭には必ず通し番号を付けてください。**
+この分野の記事は全体の{start}番目から{end}番目にあたるので、
+「{start}件目。」から始めて、1件ごとに番号を1つずつ増やしてください。
+番号のあとに記事の題名を述べてから、内容の解説に入ること。
+
 **1記事あたり6文から10文**、しっかり中身を語ること。薄い紹介で終わらせないこと。
+渡した記事を1件も飛ばさないこと。まとめて扱わず、必ず1件ずつ独立して解説すること。
 全体のまとめや次のアクションは書かないこと（別のパートで扱います）。"""
 
 OVERVIEW_PROMPT = """以下は、ある読者が{label}保存した{count}件の記事の一覧です。
@@ -411,6 +417,7 @@ OVERVIEW_PROMPT = """以下は、ある読者が{label}保存した{count}件の
 
 この読者に向けて、音声で聴くニュース解説の「導入部分」を日本語で書いてください。
 箇条書きや記号は使わず、自然な話し言葉で3文から4文にまとめること。
+最初の一文で「今回取り上げる記事は全部で{count}件です。」と件数を明示すること。
 今日はどんな話題が多かったのか、そこから何が読み取れるのかを述べてください。
 個別の記事の詳細には立ち入らないこと（このあと1件ずつ解説します）。"""
 
@@ -531,11 +538,17 @@ def generate_report(articles: list, label: str) -> str:
     for a in articles:
         by_category.setdefault(a.get("category") or "その他", []).append(a)
 
+    # 記事には全体を通した番号を振る。音声で聴くとき何件目かが分かり、
+    # NotebookLM に読ませたときも1件ずつ辿ってもらいやすくなる。
+    number = 1
     for category, items in sorted(by_category.items(), key=lambda kv: -len(kv[1])):
+        start, end = number, number + len(items) - 1
+        number = end + 1
         try:
             sections.append(_call_gemini(
                 SECTION_PROMPT.format(
                     label=label, category=category, count=len(items),
+                    start=start, end=end,
                     articles=_format_articles(items, with_excerpt=True)[:40000]),
                 api_key, use_search=True, max_tokens=32000))
             print(f"[report] {category}: {len(items)}件 完了")
