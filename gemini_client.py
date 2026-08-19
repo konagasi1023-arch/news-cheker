@@ -448,7 +448,24 @@ def clean_for_speech(text: str) -> str:
 
     # 空行が続きすぎないようにまとめる
     out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
-    return out.strip()
+    return renumber_articles(out.strip())
+
+
+def renumber_articles(text: str) -> str:
+    """
+    「N件目」の番号を出現順に振り直す。
+
+    モデルは漢数字と算用数字を混ぜたり、「二六件目」のような
+    不正な漢数字を書くことがある。番号は聴き手が位置を掴む手がかりなので、
+    表記を算用数字に統一し、連番であることを保証する。
+    """
+    counter = [0]
+
+    def replace(_match):
+        counter[0] += 1
+        return f"{counter[0]}件目"
+
+    return re.sub(r"[0-9〇一二三四五六七八九十百]+件目", replace, text)
 
 
 def _format_articles(articles: list, with_excerpt: bool = False) -> str:
