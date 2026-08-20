@@ -23,8 +23,8 @@ import shutil
 # 読み上げ速度の実測値（日本語）。1分あたりの文字数
 CHARS_PER_MINUTE = 350
 
-# 音声解説1本の上限。30分前後で頭打ちになるので、余裕を見て25分に置く
-DEFAULT_MAX_MINUTES = 25
+# 音声解説1本の上限。ファイル数を増やしたくないので上限いっぱいの30分に置く
+DEFAULT_MAX_MINUTES = 30
 
 ARTICLE_RE = re.compile(r"\d+件目")
 SECTION_RE = re.compile(r"ここからは.{2,20}?の話題です。")
