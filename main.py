@@ -329,8 +329,15 @@ class _ArticleParser(HTMLParser):
             self.in_link = False
 
     def handle_data(self, data):
-        if self.skip_depth or self.current is None:
+        if self.skip_depth:
             return
+        if self.current is None:
+            # 段落タグを使わず div に直接本文を置くサイトがある。
+            # そういう地の文も1つの段落として拾う（拾いすぎは _flush の
+            # 文字数下限とリンク比率の減点で落ちる）
+            if not self.stack or not data.strip():
+                return
+            self.current = []
         self.current.append(data)
         if self.in_link and self.stack:
             self.link_chars[self.stack[-1]] += len(data.strip())
@@ -349,6 +356,11 @@ class _ArticleParser(HTMLParser):
             total += self._link_chars_deep(child)
         return total
 
+    # 地の文なら句点がこれくらいの密度で現れる。
+    # 見出しの一覧はほとんど句点を含まないので、これで見分けられる
+    # （実測: 本文は千字あたり9〜21個、見出し一覧は2個未満）
+    MIN_PERIODS_PER_1000 = 5
+
     def best_text(self) -> str:
         """本文らしさが最も高いコンテナのテキストを返す"""
         best, best_score = "", 0.0
@@ -357,11 +369,16 @@ class _ArticleParser(HTMLParser):
             total = sum(len(t) for t in texts)
             if total < 200:
                 continue
+            joined = "\n".join(texts)
+            # 句点が少ないものは記事一覧やナビゲーションなので採らない
+            periods = joined.count("。") + joined.count(". ")
+            if periods / total * 1000 < self.MIN_PERIODS_PER_1000:
+                continue
             # リンクだらけのコンテナは関連記事一覧なので減点する
             link_ratio = self._link_chars_deep(cid) / max(total, 1)
             adjusted = score * (1 - min(link_ratio, 1.0))
             if adjusted > best_score:
-                best_score, best = adjusted, "\n".join(texts)
+                best_score, best = adjusted, joined
         return best
 
 
@@ -393,10 +410,21 @@ def extract_article_body(html: str) -> str:
         return ""
 
 
+def _strip_smartnews_chrome(text: str) -> str:
+    """SmartNews のページ本体に混ざるフッターや導線の文言を落とす"""
+    noise = ("特定商取引法", "電気通信事業法", "ヘルプセンター", "運営会社",
+             "アプリをダウンロード", "続きを読もう", "媒体運営者", "開発者ブログ",
+             "利用規約", "プライバシーポリシー")
+    lines = [l for l in text.split("\n")
+             if l.strip() and not any(w in l for w in noise)]
+    return "\n".join(lines)
+
+
 def fetch_meta(url: str) -> dict:
     """
     URL からタイトル・本文抜粋・本文を取得する。
     X のポストは oEmbed、SmartNews は元記事を解決してから本文を取る。
+    元記事が取れないときは SmartNews に載っている書き出しで代替する。
 
     Returns:
         {"title", "description", "body", "original_url", "site"}
@@ -417,6 +445,12 @@ def fetch_meta(url: str) -> dict:
         site = sn["site"]
 
     html = _download_html(target)
+    from_smartnews_preview = False
+    if not html and original_url:
+        # 元記事がボットを拒否している場合でも、SmartNews のページには
+        # 記事の書き出しが載っている。全文には及ばないが要約の材料にはなる。
+        html = _download_html(url)
+        from_smartnews_preview = bool(html)
     if not html:
         return {**empty, "original_url": original_url, "site": site}
 
@@ -434,6 +468,12 @@ def fetch_meta(url: str) -> dict:
     title = re.sub(r"\s+", " ", html_module.unescape(raw_title.strip())).strip()
     description = html_module.unescape(description.strip())
     body = extract_article_body(html)
+    if from_smartnews_preview:
+        body = _strip_smartnews_chrome(body)
+    if not body and len(description) >= 60:
+        # 本文が取れないページでも、og:description には記事の書き出しが入る。
+        # 全文には及ばないが、要約やレポートの材料としては使える。
+        body = description
 
     return {"title": title, "description": description[:1000],
             "body": body, "original_url": original_url, "site": site}
