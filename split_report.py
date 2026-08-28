@@ -70,6 +70,32 @@ def split_block(block: str, limit: int) -> list:
     return pieces
 
 
+def to_articles(text: str) -> list:
+    """
+    レポートを記事単位に切り出す。
+    カテゴリの見出しは、その直後の記事にくっつけて持たせる。
+
+    ブロック（カテゴリ）単位で詰めるとファイル数が余分に増えるため、
+    記事単位まで細かくしてから詰め直せるようにする。
+    """
+    starts = []
+    for m in ARTICLE_RE.finditer(text):
+        pos = m.start()
+        # 直前がカテゴリの見出しなら、そこから切って見出しを記事側に持たせる
+        head = SECTION_RE.search(text, max(0, pos - 200), pos)
+        if head and not text[head.end():pos].strip():
+            pos = head.start()
+        starts.append(pos)
+
+    if not starts:
+        return [text]
+    units = [text[:starts[0]].strip()]          # 導入部
+    for i, pos in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        units.append(text[pos:end].strip())
+    return [u for u in units if u]
+
+
 def pack(blocks: list, limit: int) -> list:
     """順序を保ったまま、1つの束が limit を超えないように詰める"""
     bins, current = [], ""
@@ -86,9 +112,17 @@ def pack(blocks: list, limit: int) -> list:
 
 def balanced_split(text: str, max_chars: int) -> list:
     """最小のファイル数で、かつ各ファイルができるだけ均等になるように分ける"""
+    # まずカテゴリ単位で詰めてみて、それで最小数に収まらないなら記事単位で詰める。
+    # カテゴリ単位のほうが話の区切りが自然だが、詰めが甘くなりやすい。
     blocks = []
     for b in split_into_blocks(text):
         blocks.extend(split_block(b, max_chars))
+
+    ideal = math.ceil(len(text) / max_chars)
+    if len(pack(blocks, max_chars)) > ideal:
+        articles = to_articles(text)
+        if len(pack(articles, max_chars)) < len(pack(blocks, max_chars)):
+            blocks = articles
 
     fewest = len(pack(blocks, max_chars))
     if fewest <= 1:
