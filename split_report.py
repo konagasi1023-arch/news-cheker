@@ -26,7 +26,9 @@ CHARS_PER_MINUTE = 350
 # 音声解説1本の上限。ファイル数を増やしたくないので上限いっぱいの30分に置く
 DEFAULT_MAX_MINUTES = 30
 
-ARTICLE_RE = re.compile(r"\d+件目")
+# 記事の頭にある番号だけを数える。本文中の「25件目の記事と…」を
+# 数えると件数が合わなくなる
+ARTICLE_RE = re.compile(r"^\d+件目", re.MULTILINE)
 SECTION_RE = re.compile(r"ここからは.{2,20}?の話題です。")
 
 

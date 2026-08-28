@@ -371,6 +371,10 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
 # 日次・週次レポート生成
 # ---------------------------------------------------------------------------
 
+# 1回の生成で扱う記事の上限。これを超えると解説が痩せ、
+# 中身のない項目で件数を埋めようとする（実測39件で発生）
+MAX_ARTICLES_PER_CALL = 15
+
 SECTION_PROMPT = """あなたは、専門分野に精通したニュース解説者です。
 以下は、ある読者が{label}保存した「{category}」分野の記事です。
 
@@ -393,6 +397,8 @@ SECTION_PROMPT = """あなたは、専門分野に精通したニュース解説
 
 検索しても内容がわからなかった記事は、憶測で埋めず
 「詳しい内容までは確認できませんでした」と正直に述べて短く切り上げてください。
+似た話題の記事があっても、「他の記事と重複しています」で済ませないこと。
+記事が違えば書き手も切り口も違うので、その記事自身の中身を必ず解説してください。
 事実の創作は絶対にしないこと。推測は「〜と考えられます」と明示すること。
 
 ■ 音声で聴くための書き方
@@ -461,11 +467,14 @@ def renumber_articles(text: str) -> str:
     """
     counter = [0]
 
-    def replace(_match):
+    def replace(match):
         counter[0] += 1
-        return f"{counter[0]}件目"
+        return f"{match.group(1)}{counter[0]}件目"
 
-    return re.sub(r"[0-9〇一二三四五六七八九十百]+件目", replace, text)
+    # 記事の頭にある番号だけを振り直す。本文中で他の記事に言及した
+    # 「25件目の記事と…」まで書き換えると、参照先がずれてしまう。
+    return re.sub(r"(\A|\n)[0-9〇一二三四五六七八九十百]+件目",
+                  replace, text)
 
 
 def _format_articles(articles: list, with_excerpt: bool = False) -> str:
@@ -559,18 +568,23 @@ def generate_report(articles: list, label: str) -> str:
     # NotebookLM に読ませたときも1件ずつ辿ってもらいやすくなる。
     number = 1
     for category, items in sorted(by_category.items(), key=lambda kv: -len(kv[1])):
-        start, end = number, number + len(items) - 1
-        number = end + 1
-        try:
-            sections.append(_call_gemini(
-                SECTION_PROMPT.format(
-                    label=label, category=category, count=len(items),
-                    start=start, end=end,
-                    articles=_format_articles(items, with_excerpt=True)[:40000]),
-                api_key, use_search=True, max_tokens=32000))
-            print(f"[report] {category}: {len(items)}件 完了")
-        except Exception as e:
-            print(f"[report] {category} の生成に失敗（この分野は飛ばします）: {e}")
+        # 1回で書かせる件数が多すぎると、モデルが最後まで書ききれずに
+        # 「他の記事と重複しています」のような中身のない項目で埋め始める。
+        # 実測では39件を1回で頼んだときに起きたので、分けて頼む。
+        for i in range(0, len(items), MAX_ARTICLES_PER_CALL):
+            chunk = items[i:i + MAX_ARTICLES_PER_CALL]
+            start, end = number, number + len(chunk) - 1
+            number = end + 1
+            try:
+                sections.append(_call_gemini(
+                    SECTION_PROMPT.format(
+                        label=label, category=category, count=len(chunk),
+                        start=start, end=end,
+                        articles=_format_articles(chunk, with_excerpt=True)[:40000]),
+                    api_key, use_search=True, max_tokens=32000))
+                print(f"[report] {category}: {start}〜{end}件目 完了")
+            except Exception as e:
+                print(f"[report] {category} {start}〜{end}件目 の生成に失敗（飛ばします）: {e}")
 
     if not sections:
         raise RuntimeError("レポートを生成できませんでした")
