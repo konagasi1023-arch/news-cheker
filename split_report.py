@@ -144,10 +144,14 @@ def run(path: str, max_minutes: int) -> None:
     max_chars = max_minutes * CHARS_PER_MINUTE
 
     parts = balanced_split(text, max_chars)
-    date = re.search(r"\d{4}-\d{2}-\d{2}", os.path.basename(path))
+    stem = os.path.splitext(os.path.basename(path))[0]
+    date = re.search(r"\d{4}-\d{2}-\d{2}", stem)
     date = date.group(0) if date else "report"
 
-    outdir = os.path.join(os.path.dirname(path), f"{date}_分割")
+    # 出力先は元ファイル名ごとに分ける。日付だけで決めると、
+    # 同じ日に2回作ったとき前のレポートの分割を消してしまう。
+    label = stem.replace("日次レポート_", "").replace("音声用", "").strip("_")
+    outdir = os.path.join(os.path.dirname(path), f"{label}_分割")
     if len(parts) <= 1:
         print(f"全{total_articles}件 / 約{len(text)//CHARS_PER_MINUTE}分 — "
               f"1本で聴き切れるので分割しません。")
