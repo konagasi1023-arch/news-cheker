@@ -722,9 +722,9 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
 @app.get("/save")
 async def save_from_share(url: str = "", title: str = "", text: str = ""):
     """PWA シェアターゲット：Chrome の共有から URL を受信して Notion に保存"""
-    # urlが空の場合、textからURLを抽出（SmartNews等はURLをtextに埋め込む）
-    if not url and text:
-        match = re.search(r'https?://\S+', text)
+    # URL がどの欄に入ってくるかは共有元によって違うので、全部から探す
+    if not url:
+        match = re.search(r'https?://\S+', f"{text}\n{title}")
         if match:
             url = match.group()
     # 共有テキストのURL以外の部分は本文（SNSポスト等）として要約の材料に使う
@@ -732,7 +732,17 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
     if not title and shared_text:
         title = shared_text[:100]
     if not url:
-        return HTMLResponse(content="<html><body><p>URLが指定されていません</p></body></html>")
+        # 何が届いたかを見せる。共有元によっては欄が空で来るので、
+        # どこを直せばよいかが分からないと詰まってしまう。
+        got = " / ".join(f"{k}={v[:60] or '（空）'}"
+                         for k, v in (("url", url), ("text", text), ("title", title)))
+        return HTMLResponse(content=(
+            "<html><body style='font-family:sans-serif;padding:24px'>"
+            "<h3>URLが見つかりませんでした</h3>"
+            f"<p>受け取った内容：<br><code>{got}</code></p>"
+            "<p>共有元がリンクを渡していないようです。"
+            "投稿本文をコピーしてから「本文つき」で共有し直すと保存できます。</p>"
+            "</body></html>"))
 
     try:
         result = save_article(clean_url(url), title, shared_text)
@@ -784,13 +794,23 @@ async def webhook(request: Request):
     if len(title) > 120:
         raw_text = f"{title}\n{raw_text}".strip()
         title = ""
+    # 件名がリンクだけのこともある。それを題名にしても意味がない
+    if title and not re.sub(r'https?://\S+', '', title).strip():
+        title = ""
 
     # 共有アプリによっては url 欄に「ポスト本文＋URL」が丸ごと入るため、
     # URLを正規表現で抽出し、残りは本文（要約の材料）として扱う
     combined = f"{raw_url}\n{raw_text}".strip()
     match = re.search(r'https?://\S+', combined)
     if not match:
-        raise HTTPException(status_code=400, detail=f"URL が見つかりません: {combined[:100]}")
+        # 件名にしかリンクが無いこともあるので、最後にそこも見る
+        match = re.search(r'https?://\S+', title)
+    if not match:
+        got = " / ".join(f"{k}={(v or '（空）')[:60]}" for k, v in
+                         (("url", raw_url), ("text", raw_text), ("title", title)))
+        raise HTTPException(
+            status_code=400,
+            detail=f"URL が見つかりません。受け取った内容: {got}")
     url = clean_url(match.group())
     shared_text = re.sub(r'https?://\S+', '', combined).strip(" -\n")
 
