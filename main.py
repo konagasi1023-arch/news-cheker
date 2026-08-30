@@ -182,13 +182,23 @@ def _extract_meta(html: str, prop_patterns: list) -> str:
     return ""
 
 
-def _download_html(url: str, max_bytes: int = 400000, timeout: int = 12) -> str:
-    """URL の HTML を charset を考慮して取得する。失敗時は空文字"""
+# ログインを要求された先のURL。ここに飛ばされたページの中身は記事ではない
+LOGIN_WALL_RE = re.compile(r"/(login|signin|sign_in|accounts/login)\b", re.IGNORECASE)
+
+
+def _download(url: str, max_bytes: int = 400000, timeout: int = 12) -> tuple:
+    """
+    URL の HTML を charset を考慮して取得する。
+
+    Returns:
+        (html, 最終URL)。失敗時は ("", "")
+    """
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
         })
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            final_url = resp.geturl()
             content_type = resp.headers.get("Content-Type", "")
             charset_match = re.search(r"charset=([\w-]+)", content_type)
             charset = charset_match.group(1) if charset_match else None
@@ -199,9 +209,30 @@ def _download_html(url: str, max_bytes: int = 400000, timeout: int = 12) -> str:
                 rb'<meta[^>]+charset=["\']?([\w-]+)', raw, re.IGNORECASE)
             charset = meta_match.group(1).decode("ascii", errors="ignore") if meta_match else "utf-8"
 
-        return raw.decode(charset, errors="ignore")
+        return raw.decode(charset, errors="ignore"), final_url
     except Exception:
+        return "", ""
+
+
+def _download_html(url: str, max_bytes: int = 400000, timeout: int = 12) -> str:
+    """
+    記事ページの HTML を取得する。失敗時は空文字。
+
+    ログイン画面に飛ばされた場合も空文字を返す。ログイン画面にも
+    og:title などは付いているので、そのまま使うと
+    「このページを見るには、ログインまたは登録してください」が
+    記事の題名として保存されてしまう。
+    """
+    html, final_url = _download(url, max_bytes, timeout)
+    if final_url and LOGIN_WALL_RE.search(final_url):
         return ""
+    # リダイレクトせずにログイン画面を返してくる場合もある。
+    # ただしパスワード欄の有無で判定すると、記事の読めるサイトでも
+    # ヘッダーのログイン欄に反応してしまう（GIGAZINE で確認）。
+    # ログイン画面そのものを指す目印だけを見る。
+    if html and re.search(r'id="login_form"', html[:200000], re.IGNORECASE):
+        return ""
+    return html
 
 
 SMARTNEWS_HOST_RE = re.compile(r"https?://(?:www\.|l\.)?smartnews\.com/")
@@ -652,9 +683,16 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
 
     # タイトルと本文を取得（X は oEmbed、SmartNews は元記事を解決して本文まで取る）
     meta = fetch_meta(url)
-    title = title_hint or meta["title"] or _fallback_title(url)
     # 要約の材料は 本文 > 共有テキスト > description の順に良い
     context = meta["body"] or context_hint or meta["description"]
+
+    # ページが読めない SNS 投稿でも、共有された本文の書き出しを題名にすれば
+    # ドメイン名だけの「www.facebook.com」よりは中身が分かる
+    title = title_hint or meta["title"]
+    if not title and context:
+        first_line = next((l for l in context.split("\n") if l.strip()), "")
+        title = first_line.strip()[:80]
+    title = title or _fallback_title(url)
 
     # 分類できなかった場合はカテゴリを空のままにしておく。
     # 「その他」と書いてしまうと、後から未分類のページを見分けられなくなるため。
@@ -740,6 +778,12 @@ async def webhook(request: Request):
     raw_url = (body.get("url") or "").strip()
     raw_text = (body.get("text") or "").strip()
     title = (body.get("title") or "").strip()
+
+    # 共有元が件名に投稿本文をそのまま入れてくることがある。
+    # 長すぎるものを題名にすると読み上げが破綻するので、本文側に回す。
+    if len(title) > 120:
+        raw_text = f"{title}\n{raw_text}".strip()
+        title = ""
 
     # 共有アプリによっては url 欄に「ポスト本文＋URL」が丸ごと入るため、
     # URLを正規表現で抽出し、残りは本文（要約の材料）として扱う

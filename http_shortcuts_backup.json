@@ -4,12 +4,12 @@
     {
       "id": "news_cheker_url",
       "name": "News Cheker",
-      "description": "URLをNotionに保存",
+      "description": "URLをNotionに保存（共有された件名も一緒に送る）",
       "iconName": "flat_bookmark",
       "method": "POST",
       "url": "https://news-cheker.onrender.com/webhook",
       "contentType": "application/json",
-      "bodyContent": "{\"url\": \"{url}\"}",
+      "bodyContent": "{\"url\": \"{url}\", \"title\": \"{sharetitle}\"}",
       "timeout": 120000,
       "feedbackType": "toast",
       "successMessage": "Notionに保存しました",
@@ -18,13 +18,31 @@
         "failureOutput": "detailed",
         "successMessage": "Notionに保存しました"
       }
+    },
+    {
+      "id": "news_cheker_with_body",
+      "name": "News Cheker（本文つき）",
+      "description": "投稿本文をコピーしてから使う。クリップボードの中身を本文として一緒に送る。Facebookのようにリンクしか共有されないSNS向け。",
+      "iconName": "flat_clipboard",
+      "method": "POST",
+      "url": "https://news-cheker.onrender.com/webhook",
+      "contentType": "application/json",
+      "bodyContent": "{\"url\": \"{url}\", \"text\": \"{clipboard}\"}",
+      "timeout": 120000,
+      "feedbackType": "toast",
+      "successMessage": "本文つきで保存しました",
+      "responseHandling": {
+        "successOutput": "message",
+        "failureOutput": "detailed",
+        "successMessage": "本文つきで保存しました"
+      }
     }
   ],
   "categories": [
     {
       "id": "default",
       "name": "Shortcuts",
-      "shortcutIds": ["news_cheker_url"]
+      "shortcutIds": ["news_cheker_url", "news_cheker_with_body"]
     }
   ],
   "variables": [
@@ -37,7 +55,27 @@
       "shareSupport": "text",
       "rememberValue": false,
       "urlEncode": false,
-      "jsonEncode": false
+      "jsonEncode": true
+    },
+    {
+      "id": "var_sharetitle",
+      "key": "sharetitle",
+      "type": "text",
+      "title": "共有された件名",
+      "isSharedText": true,
+      "shareSupport": "title",
+      "rememberValue": false,
+      "urlEncode": false,
+      "jsonEncode": true
+    },
+    {
+      "id": "var_clipboard",
+      "key": "clipboard",
+      "type": "clipboard",
+      "title": "クリップボードの本文",
+      "rememberValue": false,
+      "urlEncode": false,
+      "jsonEncode": true
     }
   ]
 }
