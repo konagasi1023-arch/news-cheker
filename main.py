@@ -672,9 +672,14 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
     """
     token, database_id = notion_writer.get_credentials()
 
-    # 重複チェック：同じURLが既にあれば保存しない
+    # 重複チェック。リンクを持たない投稿は題名で照合する
     try:
-        existing = notion_writer.find_by_url(url, token, database_id)
+        if url:
+            existing = notion_writer.find_by_url(url, token, database_id)
+        else:
+            existing = notion_writer.find_by_title(
+                title_hint or (context_hint or "").split("\n")[0][:80],
+                token, database_id)
     except Exception:
         existing = ""  # 照会に失敗しても保存は続行する
     if existing:
@@ -682,7 +687,9 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
                 "category": "", "tags": [], "summary": []}
 
     # タイトルと本文を取得（X は oEmbed、SmartNews は元記事を解決して本文まで取る）
-    meta = fetch_meta(url)
+    # リンクが無い投稿は取りに行く先が無いので、共有された本文だけで組み立てる
+    meta = fetch_meta(url) if url else {
+        "title": "", "description": "", "body": "", "original_url": "", "site": ""}
     # 要約の材料は 本文 > 共有テキスト > description の順に良い
     context = meta["body"] or context_hint or meta["description"]
 
@@ -729,23 +736,29 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
             url = match.group()
     # 共有テキストのURL以外の部分は本文（SNSポスト等）として要約の材料に使う
     shared_text = re.sub(r'https?://\S+', '', text).strip(" -\n") if text else ""
+    # 件名と本文が同じ内容で来ることがある（Facebook はこの形）
+    if title and shared_text and title.strip() == shared_text.strip():
+        title = ""
+    if not shared_text and title:
+        shared_text = title
     if not title and shared_text:
         title = shared_text[:100]
-    if not url:
-        # 何が届いたかを見せる。共有元によっては欄が空で来るので、
-        # どこを直せばよいかが分からないと詰まってしまう。
+
+    # Facebook はリンクを渡さず投稿本文だけを寄こす。中身があるなら
+    # リンクが無くても保存する（読みたいのは投稿の中身であってURLではない）
+    if not url and not shared_text:
         got = " / ".join(f"{k}={v[:60] or '（空）'}"
                          for k, v in (("url", url), ("text", text), ("title", title)))
         return HTMLResponse(content=(
             "<html><body style='font-family:sans-serif;padding:24px'>"
-            "<h3>URLが見つかりませんでした</h3>"
+            "<h3>保存できる内容がありませんでした</h3>"
             f"<p>受け取った内容：<br><code>{got}</code></p>"
-            "<p>共有元がリンクを渡していないようです。"
-            "投稿本文をコピーしてから「本文つき」で共有し直すと保存できます。</p>"
+            "<p>リンクも本文も渡されていません。"
+            "投稿本文を選択してコピーしてから共有し直してください。</p>"
             "</body></html>"))
 
     try:
-        result = save_article(clean_url(url), title, shared_text)
+        result = save_article(clean_url(url) if url else "", title, shared_text)
         category, tags = result["category"], result["tags"]
         title = result["title"]
         if result["duplicate"]:
@@ -800,19 +813,28 @@ async def webhook(request: Request):
     # どの欄にリンクが入るかは共有元次第なので、件名も含めて探す。
     combined = f"{raw_url}\n{raw_text}".strip()
     match = re.search(r'https?://\S+', combined) or re.search(r'https?://\S+', title)
-    if not match:
-        got = " / ".join(f"{k}={(v or '（空）')[:60]}" for k, v in
-                         (("url", raw_url), ("text", raw_text), ("title", title)))
-        raise HTTPException(
-            status_code=400,
-            detail=f"URL が見つかりません。受け取った内容: {got}")
-    url = clean_url(match.group())
+    url = clean_url(match.group()) if match else ""
     shared_text = re.sub(r'https?://\S+', '', combined).strip(" -\n")
+
+    # 件名と本文が同じ内容で来ることがある（Facebook はこの形）
+    if title and shared_text and title.strip() == shared_text.strip():
+        title = ""
+    if not shared_text and title:
+        shared_text = title
 
     # 件名がリンクだけだった場合、それを題名にしても意味がない。
     # URL を取り出したあとで判定すること（先に消すとリンクごと失われる）
     if title and not re.sub(r'https?://\S+', '', title).strip():
         title = ""
+
+    # Facebook はリンクを渡さず投稿本文だけを寄こす。
+    # 中身があるならリンクが無くても保存する
+    if not url and not shared_text:
+        got = " / ".join(f"{k}={(v or '（空）')[:60]}" for k, v in
+                         (("url", raw_url), ("text", raw_text), ("title", title)))
+        raise HTTPException(
+            status_code=400,
+            detail=f"リンクも本文もありません。受け取った内容: {got}")
 
     try:
         result = save_article(url, title, shared_text)

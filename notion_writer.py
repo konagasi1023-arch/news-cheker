@@ -101,6 +101,24 @@ def find_by_url(url: str, token: str, database_id: str) -> str:
     return f"https://www.notion.so/{results[0]['id'].replace('-', '')}"
 
 
+def find_by_title(title: str, token: str, database_id: str) -> str:
+    """
+    同じ題名のページを探す。
+    リンクを持たない投稿（Facebook など）は URL で重複判定できないため。
+    """
+    if not title:
+        return ""
+    res = notion_request(
+        "POST", f"/databases/{database_id}/query", token,
+        {"filter": {"property": "名前", "title": {"equals": title[:100]}},
+         "page_size": 1},
+    )
+    results = res.get("results", [])
+    if not results:
+        return ""
+    return f"https://www.notion.so/{results[0]['id'].replace('-', '')}"
+
+
 def build_properties(url: str, title: str, category: str = "", tags: list = None) -> dict:
     """ページのプロパティ辞書を組み立てる（新規作成・更新で共用）"""
     props = {
