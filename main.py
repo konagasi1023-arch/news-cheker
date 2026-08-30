@@ -794,17 +794,12 @@ async def webhook(request: Request):
     if len(title) > 120:
         raw_text = f"{title}\n{raw_text}".strip()
         title = ""
-    # 件名がリンクだけのこともある。それを題名にしても意味がない
-    if title and not re.sub(r'https?://\S+', '', title).strip():
-        title = ""
 
     # 共有アプリによっては url 欄に「ポスト本文＋URL」が丸ごと入るため、
-    # URLを正規表現で抽出し、残りは本文（要約の材料）として扱う
+    # URLを正規表現で抽出し、残りは本文（要約の材料）として扱う。
+    # どの欄にリンクが入るかは共有元次第なので、件名も含めて探す。
     combined = f"{raw_url}\n{raw_text}".strip()
-    match = re.search(r'https?://\S+', combined)
-    if not match:
-        # 件名にしかリンクが無いこともあるので、最後にそこも見る
-        match = re.search(r'https?://\S+', title)
+    match = re.search(r'https?://\S+', combined) or re.search(r'https?://\S+', title)
     if not match:
         got = " / ".join(f"{k}={(v or '（空）')[:60]}" for k, v in
                          (("url", raw_url), ("text", raw_text), ("title", title)))
@@ -813,6 +808,11 @@ async def webhook(request: Request):
             detail=f"URL が見つかりません。受け取った内容: {got}")
     url = clean_url(match.group())
     shared_text = re.sub(r'https?://\S+', '', combined).strip(" -\n")
+
+    # 件名がリンクだけだった場合、それを題名にしても意味がない。
+    # URL を取り出したあとで判定すること（先に消すとリンクごと失われる）
+    if title and not re.sub(r'https?://\S+', '', title).strip():
+        title = ""
 
     try:
         result = save_article(url, title, shared_text)
