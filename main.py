@@ -669,10 +669,13 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
     except Exception as e:
         print(f"[WARN] 分類をスキップしました: {type(e).__name__}: {e}")
 
+    # 抜粋として残すのは分類に使ったものと同じ材料にする。
+    # Facebook のようにログインなしでは読めない投稿でも、共有時に本文が
+    # 一緒に送られてくることがあり、それを捨てるとレポートの材料が消える。
     notion_url = notion_writer.save_to_notion(
         url, title, token, database_id,
         category=category, tags=tags, summary=summary,
-        excerpt=meta["body"], original_url=meta["original_url"],
+        excerpt=context, original_url=meta["original_url"],
     )
     return {"duplicate": False, "notion_url": notion_url, "title": title,
             "category": category, "tags": tags, "summary": summary}
