@@ -263,17 +263,22 @@ URL: {url}
 与えられた情報から確実に言えることだけを書き、推測で補わない。
 情報が少ない場合は1〜2行でよい。
 
-【題名】本文から記事そのものの題名を抜き出す。
+【題名】記事そのものの題名を返す。
 本文をコピーして共有すると、先頭にサイトのナビゲーション（"Skip to main content"、
 "Back to 〜"）や媒体名・シリーズ名が混ざることがある。それらは題名ではない。
+日付（"August 25, 2026 | Survey"）や著者名も題名ではない。
 題名が何行目にあるかは媒体によって違うので、位置ではなく中身で選ぶこと。
-本文から題名を判断できないときは空文字にする。推測で作らない。
+- 本文の中に題名がそのまま書かれていれば、一字一句そのまま返し title_composed を false にする。
+- 見出しが画像になっているなどで本文に題名が見当たらないときは、本文の内容から
+  20〜60字程度の題名を作り、title_composed を true にする。
+  本文に書かれていることだけを使い、書かれていない事実を足さないこと。
+- 本文に中身が無いとき（has_content が false）は題名を空文字にする。作らない。
 
 【内容の有無】本文が記事の中身を含んでいるなら true、
 題名・URL・リンク切れの案内しかなく中身が無いなら false。
 false のときは summary を空の配列にすること。推測で埋めてはいけない。
 
-JSON形式のみで出力: {{"category": "...", "tags": ["...", "..."], "summary": ["1行目", "2行目", "3行目"], "title": "...", "has_content": true}}"""
+JSON形式のみで出力: {{"category": "...", "tags": ["...", "..."], "summary": ["1行目", "2行目", "3行目"], "title": "...", "title_composed": false, "has_content": true}}"""
 
 
 def classify(title: str, url: str = "", context: str = "") -> dict:
@@ -292,7 +297,7 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         呼び出し側はこれを見て「分類済み」として記録しないよう判断できる。
     """
     fallback = {"category": FALLBACK_CATEGORY, "tags": [], "summary": [],
-                "article_title": "", "has_content": False,
+                "article_title": "", "title_composed": False, "has_content": False,
                 "ok": False, "quota_exceeded": False}
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -384,9 +389,13 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
     raw_title = data.get("title")
     article_title = raw_title.strip()[:100] if isinstance(raw_title, str) else ""
 
+    # 見出しが画像の記事は本文に題名が無く、モデルが本文から作る。実際の見出しとは
+    # 字面が違うので、作ったものかどうかを呼び出し側が区別できる形で返す。
+    title_composed = bool(article_title) and data.get("title_composed") is True
+
     return {"category": category, "tags": tags[:MAX_TAGS], "summary": summary,
-            "article_title": article_title, "has_content": has_content,
-            "ok": True, "quota_exceeded": False}
+            "article_title": article_title, "title_composed": title_composed,
+            "has_content": has_content, "ok": True, "quota_exceeded": False}
 
 
 # ---------------------------------------------------------------------------

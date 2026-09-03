@@ -647,6 +647,9 @@ async def index():
 # 保存エンドポイント
 # ---------------------------------------------------------------------------
 
+# 本文から作った題名であることを示す印。Notion で絞り込めるようタグに残す
+COMPOSED_TITLE_TAG = "題名は自動生成"
+
 NAV_LINE_PATTERN = re.compile(
     r"^(skip to |back to |browse |subscribe|share$|menu$|search$)", re.I)
 
@@ -724,6 +727,10 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
             # ので、本文を読んでいるモデルに題名そのものを選ばせる。
             if not title and result["article_title"]:
                 title = result["article_title"]
+                # 本文から作った題名は実際の見出しと字面が違う。あとから
+                # 見分けられるよう印を残す（本物の見出しと混ぜない）。
+                if result["title_composed"]:
+                    tags = tags + [COMPOSED_TITLE_TAG]
         else:
             print(f"[WARN] 分類できませんでした（未分類で保存します）: {(title or context)[:40]}")
     except Exception as e:
