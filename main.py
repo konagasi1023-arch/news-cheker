@@ -647,6 +647,20 @@ async def index():
 # 保存エンドポイント
 # ---------------------------------------------------------------------------
 
+NAV_LINE_PATTERN = re.compile(
+    r"^(skip to |back to |browse |subscribe|share$|menu$|search$)", re.I)
+
+
+def _title_from_text(text: str) -> str:
+    """本文からナビゲーション行を除いて題名らしい行を選ぶ（モデルが出せなかったとき用）"""
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or NAV_LINE_PATTERN.match(line):
+            continue
+        return line[:80]
+    return ""
+
+
 def _fallback_title(url: str) -> str:
     """タイトルが空のときURLのドメインで代替する"""
     try:
@@ -696,10 +710,6 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
     # ページが読めない SNS 投稿でも、共有された本文の書き出しを題名にすれば
     # ドメイン名だけの「www.facebook.com」よりは中身が分かる
     title = title_hint or meta["title"]
-    if not title and context:
-        first_line = next((l for l in context.split("\n") if l.strip()), "")
-        title = first_line.strip()[:80]
-    title = title or _fallback_title(url)
 
     # 分類できなかった場合はカテゴリを空のままにしておく。
     # 「その他」と書いてしまうと、後から未分類のページを見分けられなくなるため。
@@ -709,10 +719,20 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
         result = gemini_client.classify(title, url, context)
         if result["ok"]:
             category, tags, summary = result["category"], result["tags"], result["summary"]
+            # 本文をコピーした共有では、題名が何行目に来るかが媒体ごとに違う
+            # （1行目がナビゲーションや媒体名のことがある）。行の位置では当てられない
+            # ので、本文を読んでいるモデルに題名そのものを選ばせる。
+            if not title and result["article_title"]:
+                title = result["article_title"]
         else:
-            print(f"[WARN] 分類できませんでした（未分類で保存します）: {title[:40]}")
+            print(f"[WARN] 分類できませんでした（未分類で保存します）: {(title or context)[:40]}")
     except Exception as e:
         print(f"[WARN] 分類をスキップしました: {type(e).__name__}: {e}")
+
+    # モデルが題名を出せなかったときだけ、本文の先頭行に落とす
+    if not title and context:
+        title = _title_from_text(context)
+    title = title or _fallback_title(url)
 
     # 抜粋として残すのは分類に使ったものと同じ材料にする。
     # Facebook のようにログインなしでは読めない投稿でも、共有時に本文が
@@ -803,8 +823,10 @@ async def webhook(request: Request):
     title = (body.get("title") or "").strip()
 
     # 共有元が件名に投稿本文をそのまま入れてくることがある。
-    # 長すぎるものを題名にすると読み上げが破綻するので、本文側に回す。
-    if len(title) > 120:
+    # 題名に改行は入らないので、改行があれば本文の切れ端だと判断する。
+    # 字数だけで見ていたときは、先頭100字で切られて送られてきた塊がすり抜け、
+    # 「Skip to main content...」がそのまま題名になった。
+    if "\n" in title or len(title) > 120:
         raw_text = f"{title}\n{raw_text}".strip()
         title = ""
 
@@ -892,6 +914,12 @@ async def generate_report(period: str, token: str = "", days: int = 0):
     notion_token, database_id = notion_writer.get_credentials()
 
     articles = notion_writer.fetch_recent_articles(notion_token, database_id, days)
+
+    # 本文も要約も無い記事は解説できない。件名に出す件数とずれないよう、
+    # 生成に渡す前に落とす（65件で作ったのに解説は62件、を防ぐ）。
+    articles, dropped = gemini_client.usable_articles(articles)
+    if dropped:
+        print(f"[report] 中身が無いため除外: {dropped}件")
     if not articles:
         return JSONResponse(content={"status": "empty", "message": f"{label}の保存記事はありません"})
 

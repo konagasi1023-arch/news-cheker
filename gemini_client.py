@@ -263,7 +263,17 @@ URL: {url}
 与えられた情報から確実に言えることだけを書き、推測で補わない。
 情報が少ない場合は1〜2行でよい。
 
-JSON形式のみで出力: {{"category": "...", "tags": ["...", "..."], "summary": ["1行目", "2行目", "3行目"]}}"""
+【題名】本文から記事そのものの題名を抜き出す。
+本文をコピーして共有すると、先頭にサイトのナビゲーション（"Skip to main content"、
+"Back to 〜"）や媒体名・シリーズ名が混ざることがある。それらは題名ではない。
+題名が何行目にあるかは媒体によって違うので、位置ではなく中身で選ぶこと。
+本文から題名を判断できないときは空文字にする。推測で作らない。
+
+【内容の有無】本文が記事の中身を含んでいるなら true、
+題名・URL・リンク切れの案内しかなく中身が無いなら false。
+false のときは summary を空の配列にすること。推測で埋めてはいけない。
+
+JSON形式のみで出力: {{"category": "...", "tags": ["...", "..."], "summary": ["1行目", "2行目", "3行目"], "title": "...", "has_content": true}}"""
 
 
 def classify(title: str, url: str = "", context: str = "") -> dict:
@@ -282,10 +292,12 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         呼び出し側はこれを見て「分類済み」として記録しないよう判断できる。
     """
     fallback = {"category": FALLBACK_CATEGORY, "tags": [], "summary": [],
+                "article_title": "", "has_content": False,
                 "ok": False, "quota_exceeded": False}
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key or not title:
+    # 題名が無くても本文があれば分類できる。本文をコピーした共有はこの形になる
+    if not api_key or not (title or context):
         return fallback
 
     prompt = CLASSIFY_PROMPT.format(
@@ -363,7 +375,17 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         if isinstance(s, str) and s.strip()
     ][:3]
 
+    # 中身が無いのに要約を書かせると、「読めなかった」ものが「読んだ」ように見える。
+    # 実際 lnkd.in の3件が「内容は不明です」という要約を持ち、レポートに紛れ込んだ。
+    has_content = data.get("has_content", True) is not False
+    if not has_content:
+        summary = []
+
+    raw_title = data.get("title")
+    article_title = raw_title.strip()[:100] if isinstance(raw_title, str) else ""
+
     return {"category": category, "tags": tags[:MAX_TAGS], "summary": summary,
+            "article_title": article_title, "has_content": has_content,
             "ok": True, "quota_exceeded": False}
 
 
@@ -528,6 +550,19 @@ def _call_gemini(prompt: str, api_key: str, use_search: bool, max_tokens: int) -
         except Exception as e:
             last_error = e
     raise RuntimeError(str(last_error))
+
+
+def usable_articles(articles: list) -> tuple:
+    """
+    解説できる材料がある記事だけに絞り、落とした件数と一緒に返す。
+
+    本文も要約も無い記事を混ぜると、モデルは「詳細は不明です」という
+    中身のない項目を書いて件数を埋める。レポートの件数表示と実際の
+    解説数がずれる原因にもなるので、生成の前に一度で落とす。
+    """
+    usable = [a for a in articles
+              if (a.get("excerpt") or "").strip() or a.get("summary")]
+    return usable, len(articles) - len(usable)
 
 
 def generate_report(articles: list, label: str) -> str:
