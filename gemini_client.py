@@ -12,6 +12,7 @@ gemini_client.py - Gemini 2.5 Flash + Google Search Grounding クライアント
 
 import json
 import os
+import unicodedata
 import re
 import time
 import urllib.request
@@ -402,6 +403,31 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
 # 日次・週次レポート生成
 # ---------------------------------------------------------------------------
 
+# 記事の頭に付く通し番号
+ARTICLE_NUMBER = re.compile(r"^[ \t]*(\d+)件目", re.M)
+
+# 解説を放棄して「重複」で済ませた項目。語尾が揺れるので前方一致で見る
+# （実測で「重複しています」と「重複しております」の両方が出た）
+DUPLICATE_STUB = re.compile(r"重複し(て|ており)")
+
+
+def verify_report(text: str, expected: int) -> dict:
+    """
+    出来上がったレポートを検算する。
+
+    モデルは件数が多いと最後まで書ききれず、中身のない項目で数を埋める。
+    黙って通すと「読んだつもりの記事」がレポートに載るので、
+    生成のたびに数を数えて突き合わせる。
+    """
+    numbers = ARTICLE_NUMBER.findall(text)
+    sequential = numbers == [str(i) for i in range(1, len(numbers) + 1)]
+    stubs = len(DUPLICATE_STUB.findall(text))
+    return {
+        "articles": expected, "numbers": len(numbers),
+        "sequential": sequential, "stubs": stubs,
+        "ok": len(numbers) == expected and sequential and stubs == 0,
+    }
+
 # 1回の生成で扱う記事の上限。これを超えると解説が痩せ、
 # 中身のない項目で件数を埋めようとする（実測39件で発生）
 MAX_ARTICLES_PER_CALL = 15
@@ -561,16 +587,41 @@ def _call_gemini(prompt: str, api_key: str, use_search: bool, max_tokens: int) -
     raise RuntimeError(str(last_error))
 
 
+def _title_key(title: str) -> str:
+    """題名を照合用にそろえる（記号・空白・全角半角の違いを無視する）"""
+    key = unicodedata.normalize("NFKC", title or "")
+    key = re.sub(r"[\s\"\'「」『』、。・！？：|]", "", key)
+    return key[:40].lower()
+
+
 def usable_articles(articles: list) -> tuple:
     """
     解説できる材料がある記事だけに絞り、落とした件数と一緒に返す。
 
-    本文も要約も無い記事を混ぜると、モデルは「詳細は不明です」という
-    中身のない項目を書いて件数を埋める。レポートの件数表示と実際の
-    解説数がずれる原因にもなるので、生成の前に一度で落とす。
+    落とすのは2種類。
+
+    1. 本文が1字も無い記事。読むものが無いので、モデルは「詳細は不明です」
+       という中身のない項目を書いて件数を埋める。
+       要約があっても残さない。本文が無いなら、その要約は題名から
+       作られたものでしかなく、解説の材料にはならないため
+       （実際 lnkd.in の記事が「本文が提供されていない」という要約を持ち、
+       それが材料ありと見なされてレポートに紛れ込んだ）。
+    2. 同じ記事の2回目。SmartNews は同じ記事でも共有のたびに別のURLを
+       発行するため、保存時の重複検知（URL照合）をすり抜けて2件入る。
+       2回解説しても聴く人の得にはならない。
+
+    どちらも生成の前に落とす。レポートの件数表示と実際の解説数を
+    合わせるためにも、絞り込みは1か所で済ませる。
     """
-    usable = [a for a in articles
-              if (a.get("excerpt") or "").strip() or a.get("summary")]
+    usable, seen = [], set()
+    for a in articles:
+        if not (a.get("excerpt") or "").strip():
+            continue
+        key = _title_key(a.get("title", ""))
+        if key and key in seen:
+            continue
+        seen.add(key)
+        usable.append(a)
     return usable, len(articles) - len(usable)
 
 
@@ -641,4 +692,12 @@ def generate_report(articles: list, label: str) -> str:
     except Exception as e:
         print(f"[report] 締めの生成に失敗: {e}")
 
-    return clean_for_speech("\n\n".join(sections))
+    text = clean_for_speech("\n\n".join(sections))
+
+    check = verify_report(text, len(articles))
+    print(f"[report] 検算: 記事{check['articles']}件 / 番号{check['numbers']}個 / "
+          f"連番{check['sequential']} / 重複スタブ{check['stubs']}箇所")
+    if not check["ok"]:
+        print("[report] !! 数が合いません。中身の抜けた項目がある可能性があります")
+
+    return text
