@@ -768,8 +768,14 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
         title = ""
     if not shared_text and title:
         shared_text = title
-    if not title and shared_text:
-        title = shared_text[:100]
+    # 共有元が件名に本文をそのまま入れてくることがある。題名に改行は入らない
+    # ので、改行があれば本文の切れ端と判断して本文側へ回す（/webhook と同じ）。
+    # ここで本文の先頭100字を題名にしていたため、アプリからコピーした共有が
+    # 「Skip to main content...」という題名で保存されていた。
+    # 題名の決定は save_article に任せる（本文を読んでいるモデルが選ぶ）。
+    if "\n" in title or len(title) > 120:
+        shared_text = f"{title}\n{shared_text}".strip()
+        title = ""
 
     # Facebook はリンクを渡さず投稿本文だけを寄こす。中身があるなら
     # リンクが無くても保存する（読みたいのは投稿の中身であってURLではない）

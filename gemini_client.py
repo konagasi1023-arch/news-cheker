@@ -279,7 +279,19 @@ URL: {url}
 題名・URL・リンク切れの案内しかなく中身が無いなら false。
 false のときは summary を空の配列にすること。推測で埋めてはいけない。
 
+【書き方の約束】値の中で二重引用符（"）を使わないこと。
+題名や本文に二重引用符が含まれる場合は、全角の「」に置き換えて書く。
+そのまま写すと JSON が壊れて、この記事は分類できないまま保存される。
+
 JSON形式のみで出力: {{"category": "...", "tags": ["...", "..."], "summary": ["1行目", "2行目", "3行目"], "title": "...", "title_composed": false, "has_content": true}}"""
+
+
+# JSON が壊れて返ってきたときに、頼み直すために足す注意書き。
+# 同じ文面で投げ直しても同じ壊れ方をするので、文面を変えて頼む。
+JSON_REMINDER = """
+
+【重要】前回の応答は JSON として壊れていた。値の中の二重引用符が原因である。
+題名をそのまま写さず、二重引用符は全角の「」に置き換えて出力すること。"""
 
 
 def classify(title: str, url: str = "", context: str = "") -> dict:
@@ -310,17 +322,20 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         title=title[:300], url=url[:300], context=context[:4000] or "（なし）",
         max_tags=MAX_TAGS,
     )
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-            # gemini-2.5-flash は思考トークンも maxOutputTokens を消費する。
-            # 出力自体は50トークン程度だが、思考分を見込んで余裕を持たせる。
-            "maxOutputTokens": 4000,
-            "responseMimeType": "application/json",
-        },
-    }
-    body = json.dumps(payload).encode("utf-8")
+    def build_body(text: str) -> bytes:
+        return json.dumps({
+            "contents": [{"role": "user", "parts": [{"text": text}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                # gemini-2.5-flash は思考トークンも maxOutputTokens を消費する。
+                # 出力自体は50トークン程度だが、思考分を見込んで余裕を持たせる。
+                "maxOutputTokens": 4000,
+                "responseMimeType": "application/json",
+            },
+        }).encode("utf-8")
+
+    body = build_body(prompt)
+    reminded = False
 
     # 無料枠はモデルごとに別勘定なので、429 が続くモデルは諦めて次のモデルに移る
     data = None
@@ -349,6 +364,15 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
                 if e.code in (404, 500, 503):
                     break
                 print(f"[classify] HTTP {e.code}: {title[:40]}")
+                return fallback
+            except json.JSONDecodeError as e:
+                # モデルが題名の二重引用符をそのまま写して JSON を壊すことがある。
+                # 同じ文面で投げ直しても同じ壊れ方をするので、注意書きを足して頼み直す。
+                if not reminded:
+                    reminded = True
+                    body = build_body(prompt + JSON_REMINDER)
+                    continue
+                print(f"[classify] JSONが壊れたまま直らない: {title[:40]}")
                 return fallback
             except Exception as e:
                 # タイムアウト等の一時的な失敗はリトライする
