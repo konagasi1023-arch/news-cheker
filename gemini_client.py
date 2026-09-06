@@ -611,11 +611,27 @@ def _call_gemini(prompt: str, api_key: str, use_search: bool, max_tokens: int) -
     raise RuntimeError(str(last_error))
 
 
-def _title_key(title: str) -> str:
-    """題名を照合用にそろえる（記号・空白・全角半角の違いを無視する）"""
-    key = unicodedata.normalize("NFKC", title or "")
-    key = re.sub(r"[\s\"\'「」『』、。・！？：|]", "", key)
-    return key[:40].lower()
+def _fold(text: str, limit: int) -> str:
+    """照合用に文字列をそろえる（記号・空白・全角半角の違いを無視する）"""
+    folded = unicodedata.normalize("NFKC", text or "")
+    folded = re.sub(r"[\s\"\'「」『』、。・！？：|]", "", folded)
+    return folded[:limit].lower()
+
+
+def _dedupe_key(article: dict) -> tuple:
+    """
+    同じ記事かどうかを判定する鍵。題名だけでなく本文の書き出しも見る。
+
+    題名の先頭だけで照合していたとき、別々のLinkedIn投稿2件が
+    同じハッシュタグ列（#digitalmarketing #aiagents #digitalsignage …）で
+    始まっていたために同一と見なされ、**本文2929字の記事がレポートから
+    消えた**。記事を1本失うほうが、同じ記事を2回聴くより悪い。
+
+    実際に起きる重複（SmartNews の再共有）は題名も本文も完全に同じなので、
+    両方を見れば取り逃さない。
+    """
+    return (_fold(article.get("title", ""), 200),
+            _fold(article.get("excerpt", ""), 200))
 
 
 def usable_articles(articles: list) -> tuple:
@@ -641,8 +657,8 @@ def usable_articles(articles: list) -> tuple:
     for a in articles:
         if not (a.get("excerpt") or "").strip():
             continue
-        key = _title_key(a.get("title", ""))
-        if key and key in seen:
+        key = _dedupe_key(a)
+        if any(key) and key in seen:
             continue
         seen.add(key)
         usable.append(a)
