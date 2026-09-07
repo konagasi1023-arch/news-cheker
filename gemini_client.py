@@ -280,8 +280,7 @@ URL: {url}
 false のときは summary を空の配列にすること。推測で埋めてはいけない。
 
 【書き方の約束】値の中で二重引用符（"）を使わないこと。
-題名や本文に二重引用符が含まれる場合は、全角の「」に置き換えて書く。
-そのまま写すと JSON が壊れて、この記事は分類できないまま保存される。
+必要なときは全角の ” か「」を使う。そのまま書くと JSON が壊れる。
 
 JSON形式のみで出力: {{"category": "...", "tags": ["...", "..."], "summary": ["1行目", "2行目", "3行目"], "title": "...", "title_composed": false, "has_content": true}}"""
 
@@ -292,6 +291,11 @@ JSON_REMINDER = """
 
 【重要】前回の応答は JSON として壊れていた。値の中の二重引用符が原因である。
 題名をそのまま写さず、二重引用符は全角の「」に置き換えて出力すること。"""
+
+
+def _safe_for_json(text: str) -> str:
+    """二重引用符を全角に寄せる。JSON の文字列を途中で終わらせないため"""
+    return (text or "").replace('"', "\u201d")
 
 
 def classify(title: str, url: str = "", context: str = "") -> dict:
@@ -318,8 +322,13 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
     if not api_key or not (title or context):
         return fallback
 
+    # モデルは題名をそのまま写すので、二重引用符が入っていると JSON が壊れる
+    # （例: "…脳の中の"真犯人""）。プロンプトで禁じるだけでは直らなかった。
+    # 指示にも、注意書きを足した再依頼にも従わず、2回とも同じ壊れ方をした。
+    # 渡す前に消しておけば写しようがない。
     prompt = CLASSIFY_PROMPT.format(
-        title=title[:300], url=url[:300], context=context[:4000] or "（なし）",
+        title=_safe_for_json(title[:300]), url=url[:300],
+        context=_safe_for_json(context[:4000]) or "（なし）",
         max_tags=MAX_TAGS,
     )
     def build_body(text: str) -> bytes:
