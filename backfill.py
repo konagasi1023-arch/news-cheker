@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 import main  # .env 読み込みと fetch_title のため
 import gemini_client
 import notion_writer
+import obsidian_sync  # 保存済み本文の読み取りを共用する
 
 PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "progress.json")
 
@@ -103,6 +104,103 @@ def report_dupes(pages: list) -> None:
         print()
 
 
+def write_classification(token: str, page_id: str, url: str, title: str,
+                         result: dict) -> None:
+    """分類の結果を Notion に書き戻す（バックフィルと再分類で共用）"""
+    notion_writer.notion_request(
+        "PATCH", f"/pages/{page_id}", token,
+        {"properties": notion_writer.build_properties(
+            url, title, result["category"], result["tags"])},
+    )
+    # 3行要約をページ本文に追記する（既に要約があるページは触らない）
+    if result["summary"]:
+        blocks = notion_writer.notion_request(
+            "GET", f"/blocks/{page_id}/children?page_size=5", token)
+        has_summary = any(
+            b.get("type") == "callout" for b in blocks.get("results", []))
+        if not has_summary:
+            notion_writer.notion_request(
+                "PATCH", f"/blocks/{page_id}/children", token,
+                {"children": [{
+                    "object": "block", "type": "callout",
+                    "callout": {
+                        "rich_text": [{"type": "text", "text": {
+                            "content": "\n".join(result["summary"])[:1900]}}],
+                        "icon": {"type": "emoji", "emoji": "📝"},
+                    },
+                }]})
+
+
+def main_reclassify(limit: int, dry_run: bool) -> None:
+    """
+    分類できていないページだけを、保存済みの本文で分類し直す。
+
+    保存時の分類は一時的に失敗することがある（通信の失敗、モデルが壊れた
+    JSON を返した等）。保存自体は止めない作りなので、カテゴリが空のまま残る。
+    本文はもう Notion にあるので、Webから取り直さずにそれを材料にする
+    （mckinsey.com のように後から取得できない媒体があるため）。
+
+    未分類のページしか触らないので、いつ実行しても安全。
+    """
+    token, database_id = notion_writer.get_credentials()
+    pages = fetch_all_pages(token, database_id)
+    targets = [p for p in pages if not p["category"]]
+    print(f"総ページ数: {len(pages)} / 未分類: {len(targets)}件")
+    if limit:
+        targets = targets[:limit]
+
+    stats = {"classified": 0, "no_material": 0, "unreadable": 0,
+             "skipped": 0, "failed": 0}
+
+    for i, page in enumerate(targets, 1):
+        body = obsidian_sync.fetch_body_text(token, page["id"])
+        if not body["ok"]:
+            # 読めなかっただけ。材料が無いのとは違うので、そう記録する
+            stats["unreadable"] += 1
+            print(f"[{i}/{len(targets)}] 本文を読めず: {page['title'][:45]}")
+            continue
+
+        context = body["excerpt"]
+        if not context.strip():
+            # 分類する材料が無い（本文0字のリンクだけの投稿など）。
+            # 試しても失敗するだけなので、対象から外して数える。
+            stats["no_material"] += 1
+            print(f"[{i}/{len(targets)}] 材料なし: {page['title'][:45]}")
+            continue
+
+        if dry_run:
+            print(f"[{i}/{len(targets)}] 対象（本文{len(context)}字）: {page['title'][:45]}")
+            continue
+
+        result = gemini_client.classify(page["title"], page["url"], context)
+        if result.get("quota_exceeded"):
+            print("\nGemini の割り当てを使い切ったため中断します。")
+            print("時間をおいて再実行すると、残りを処理します。")
+            break
+        if not result["ok"]:
+            stats["skipped"] += 1
+            print(f"[{i}/{len(targets)}] 分類できず: {page['title'][:45]}")
+            time.sleep(SLEEP_BETWEEN)
+            continue
+
+        try:
+            write_classification(token, page["id"], page["url"], page["title"], result)
+            stats["classified"] += 1
+            print(f"[{i}/{len(targets)}] [{result['category']}] {page['title'][:45]}")
+        except Exception as e:
+            stats["failed"] += 1
+            print(f"[{i}/{len(targets)}] 書き込み失敗: {type(e).__name__}: {str(e)[:80]}")
+
+        time.sleep(SLEEP_BETWEEN)
+
+    print(f"\n=== 完了 ===")
+    print(f"  分類できた    : {stats['classified']}")
+    print(f"  材料が無い    : {stats['no_material']}（本文が空。何度試しても分類できない）")
+    print(f"  本文を読めず  : {stats['unreadable']}（Notionの読み取りに失敗。再実行で拾える）")
+    print(f"  分類できず    : {stats['skipped']}（再実行で拾える）")
+    print(f"  書き込み失敗  : {stats['failed']}")
+
+
 def main_backfill(limit: int, dry_run: bool, skip_titles: bool) -> None:
     token, database_id = notion_writer.get_credentials()
     if not dry_run:
@@ -165,29 +263,7 @@ def main_backfill(limit: int, dry_run: bool, skip_titles: bool) -> None:
 
         # 3. Notion を更新する
         try:
-            notion_writer.notion_request(
-                "PATCH",
-                f"/pages/{page['id']}",
-                token,
-                {"properties": notion_writer.build_properties(url, title, category, tags)},
-            )
-            # 3行要約をページ本文に追記する（既に要約があるページは触らない）
-            if result["summary"]:
-                blocks = notion_writer.notion_request(
-                    "GET", f"/blocks/{page['id']}/children?page_size=5", token)
-                has_summary = any(
-                    b.get("type") == "callout" for b in blocks.get("results", []))
-                if not has_summary:
-                    notion_writer.notion_request(
-                        "PATCH", f"/blocks/{page['id']}/children", token,
-                        {"children": [{
-                            "object": "block", "type": "callout",
-                            "callout": {
-                                "rich_text": [{"type": "text", "text": {
-                                    "content": "\n".join(result["summary"])[:1900]}}],
-                                "icon": {"type": "emoji", "emoji": "📝"},
-                            },
-                        }]})
+            write_classification(token, page["id"], url, title, result)
             stats["classified"] += 1
             done.add(page["id"])
             progress["done"] = list(done)
@@ -212,11 +288,17 @@ if __name__ == "__main__":
     parser.add_argument("--dry-run", action="store_true", help="変更せず対象を表示")
     parser.add_argument("--skip-titles", action="store_true", help="タイトル再取得をしない")
     parser.add_argument("--report-dupes", action="store_true", help="重複URLの一覧のみ出力")
+    parser.add_argument("--unclassified", action="store_true",
+                        help="未分類のページだけを保存済み本文で分類し直す")
     args = parser.parse_args()
 
     if args.report_dupes:
         token, database_id = notion_writer.get_credentials()
         report_dupes(fetch_all_pages(token, database_id))
+        sys.exit(0)
+
+    if args.unclassified:
+        main_reclassify(args.limit, args.dry_run)
         sys.exit(0)
 
     main_backfill(args.limit, args.dry_run, args.skip_titles)

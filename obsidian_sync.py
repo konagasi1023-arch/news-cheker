@@ -103,7 +103,7 @@ def fetch_body_text(token: str, page_id: str) -> dict:
     ページ本文を取得する。
     コールアウトは3行要約、段落は本文抜粋（レポートの場合はレポート本文）。
     """
-    summary, paragraphs = [], []
+    summary, paragraphs, ok = [], [], True
     try:
         res = notion_writer.notion_request(
             "GET", f"/blocks/{page_id}/children?page_size=100", token)
@@ -119,9 +119,12 @@ def fetch_body_text(token: str, page_id: str) -> dict:
                 summary = [l for l in text.split("\n") if l.strip()]
             else:
                 paragraphs.append(text)
-    except Exception:
-        pass
-    return {"summary": summary, "excerpt": "\n\n".join(paragraphs)}
+    except Exception as e:
+        # 「読めなかった」と「読んだが空だった」は意味が違う。
+        # 呼び出し側が区別できるように ok を返す（黙って空を返さない）。
+        ok = False
+        print(f"[warn] 本文を読めませんでした {page_id}: {type(e).__name__}: {e}")
+    return {"summary": summary, "excerpt": "\n\n".join(paragraphs), "ok": ok}
 
 
 def build_markdown(item: dict, body: dict) -> str:
