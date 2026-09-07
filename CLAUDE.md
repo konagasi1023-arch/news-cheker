@@ -11,6 +11,8 @@ AndroidからURLや記事テキスト・画像を受信し、Geminiで分析し�
 - `main.py` — FastAPIサーバー本体・エントリポイント
 - `gemini_client.py` — Google Gemini API連携（分析処理）
 - `notion_writer.py` — Notion API連携（DB保存）
+- `run_report.py` — 音声用レポートを通しで作る（拾い直し→取得→生成→保存→分割）
+- `split_report.py` — 音声解説用にレポートを分割する
 - `render.yaml` — Render.comデプロイ設定
 - `requirements.txt` — 依存ライブラリ
 - `.env.example` — 環境変数テンプレート（`.env` を作って実際の値を設定）

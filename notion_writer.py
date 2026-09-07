@@ -212,10 +212,33 @@ def save_to_notion(
 REPORT_CATEGORY = "レポート"
 
 
-def fetch_recent_articles(token: str, database_id: str, days: int) -> list:
+def parse_time(value: str):
+    """
+    ISO の時刻文字列を時刻に直す。読めなければ None を返す。
+
+    Notion が返す作成時刻は UTC 表記（2026-09-07T12:05:00.000Z）だが、
+    こちらは JST 表記（2026-09-07T21:05:00+09:00）で指定したい。
+    文字列のまま大小を比べると、同じ瞬間でも9時間ずれて判定される。
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def fetch_recent_articles(token: str, database_id: str, days: int,
+                          created_after: str = "") -> list:
     """
     直近 days 日に保存された記事（レポートを除く）を取得する。
     各記事のページ本文から3行要約も読み取って返す。
+
+    created_after を渡すと、その時刻より後に保存された記事だけに絞る。
+    本文の読み取りは1件1リクエストなので、**絞ってから読む**こと。
+    14日ぶん引いて後から絞ると、捨てる記事の本文まで読みに行って
+    何百リクエストも無駄になる。
+    作成時刻が読めない記事は落とさずに残す（1本失うほうが痛い）。
     """
     # days=1 なら今日の分だけ、days=7 なら今日を含む7日分（暦日で数える）
     from datetime import timedelta
@@ -237,7 +260,10 @@ def fetch_recent_articles(token: str, database_id: str, days: int) -> list:
         for pg in res.get("results", []):
             props = pg.get("properties", {})
             item = {"id": pg["id"], "title": "", "url": "", "category": "",
-                    "tags": [], "summary": []}
+                    "tags": [], "summary": [],
+                    # レポートは日付ではなく「直近レポートの作成時刻」で切るので、
+                    # 呼び出し側が絞り込めるよう作成時刻も持ち回る
+                    "created_time": pg.get("created_time", "")}
             for val in props.values():
                 kind = val.get("type")
                 if kind == "title":
@@ -255,6 +281,11 @@ def fetch_recent_articles(token: str, database_id: str, days: int) -> list:
         if not res.get("has_more"):
             break
         cursor = res.get("next_cursor")
+
+    cutoff = parse_time(created_after)
+    if cutoff:
+        articles = [a for a in articles
+                    if (parse_time(a["created_time"]) or cutoff + timedelta(seconds=1)) > cutoff]
 
     # ページ本文から3行要約（コールアウト）と本文抜粋（段落）を読み取る
     for item in articles:
