@@ -10,6 +10,7 @@ gemini_client.py - Gemini 2.5 Flash + Google Search Grounding クライアント
   GEMINI_API_KEY - Google AI Studio の APIキー
 """
 
+import base64
 import json
 import os
 import unicodedata
@@ -150,6 +151,107 @@ def gemini_request(api_key: str, parts: list) -> str:
         return text
     except (KeyError, IndexError) as e:
         raise RuntimeError(f"Gemini response parse error: {e}\nRaw: {result}")
+
+
+# PDF は1本で15ページ以上あることがあり、読み取りに時間がかかる。
+# 記事1本用の 90秒では足りず、実測で一度取りこぼした（2回目は成功した）。
+# レポート生成と同じ 300秒まで待つ。
+PDF_TIMEOUT = 300
+# 図表を1つずつ言葉にすると長くなる。3,000 だと途中で切れる
+PDF_MAX_OUTPUT_TOKENS = 8000
+
+# 本文の文章は pypdf が原文のまま取れるので、こちらでは繰り返させない。
+# 繰り返すと同じ資料を二重に持つことになり、聴くときも同じ話が2回出てくる。
+FIGURES_PROMPT = """これはPDFの資料です。音声で聴く人に向けて、
+**図・グラフ・チャート・表・図解の中身だけ**を文章で説明してください。
+
+本文の文章はすでに別に読み取ってあります。**本文に書いてあることを繰り返さないこと。**
+概要や結論のまとめも要りません。文字を読めば分かることは飛ばしてください。
+あなたが担当するのは「見ないと分からないもの」だけです。
+
+図やグラフごとに、次を言葉にしてください。
+
+- その図が何と何を比べたものか、縦軸と横軸は何か
+- 主要な数値と、その大小関係や変化の向き（増えたのか減ったのか、どのくらいか）
+- その図だけから読み取れること
+
+表は、主要な行と列の数値を文章で読み上げてください。
+「グラフが示されています」「図1を参照」のような、中身に触れない書き方はしないこと。
+
+箇条書き・見出し記号・URLは使わず、地の文で書いてください。
+資料に書かれていないことは書かないこと。読み取れない図は、無理に推測せず飛ばすこと。
+図表が1つも無い資料なら、「図表はありません」とだけ答えてください。"""
+
+# スキャンして作られたPDFは文字を持たないので、pypdf が1字も取れない。
+# そのときはこちらが唯一の中身になるので、本文も読み上げてもらう。
+FULLTEXT_PROMPT = """これはPDFの資料です。文字データを持たない（画像として作られた）ため、
+本文を機械的に読み取れませんでした。音声で聴く人に向けて、中身を文章で説明してください。
+
+書かれている文章の要点を、固有名詞・数字・日付を落とさずに読み上げてください。
+図・グラフ・表があれば、縦軸と横軸、主要な数値、その大小関係も言葉にしてください。
+
+箇条書き・見出し記号・URLは使わず、地の文で書いてください。
+資料に書かれていないことは書かないこと。読み取れない箇所は、無理に推測せず飛ばすこと。"""
+
+
+def describe_pdf(raw: bytes, has_text: bool = True) -> dict:
+    """
+    PDF を Gemini に渡し、図表・グラフの中身を文章にしてもらう。
+
+    pypdf が取り出せるのは文字だけなので、**グラフの中身はここでしか拾えない**。
+
+    has_text は pypdf が本文を取れたかどうか。
+    取れているなら**図表だけ**を書かせる（本文を繰り返させると、
+    同じ資料を二重に保存することになり、聴くときも同じ話が2回出てくる）。
+    取れていないスキャンPDFでは、こちらが唯一の中身になるので本文も読ませる。
+
+    失敗は握り潰さず理由を添えて返す。呼び出し側が
+    「図表が無かった」と「読みに行けなかった」を区別できるようにするため。
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return {"ok": False, "text": "", "reason": "GEMINI_API_KEY が設定されていない"}
+
+    payload = {
+        "contents": [{"role": "user", "parts": [
+            {"inlineData": {"mimeType": "application/pdf",
+                            "data": base64.b64encode(raw).decode("ascii")}},
+            {"text": FIGURES_PROMPT if has_text else FULLTEXT_PROMPT},
+        ]}],
+        # 検索は付けない。PDF の中身を読むだけなので要らず、待ち時間が延びるだけ
+        "generationConfig": {"temperature": 0.4,
+                             "maxOutputTokens": PDF_MAX_OUTPUT_TOKENS},
+    }
+    body = json.dumps(payload).encode("utf-8")
+
+    last = "理由不明"
+    for model in [GEMINI_MODEL] + CLASSIFY_MODELS:
+        try:
+            req = urllib.request.Request(
+                f"{GEMINI_API_BASE}/{model}:generateContent?key={api_key}",
+                data=body, headers={"Content-Type": "application/json"},
+                method="POST")
+            with urllib.request.urlopen(req, timeout=PDF_TIMEOUT) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            cand = (result.get("candidates") or [{}])[0]
+            text = "".join(p.get("text", "")
+                           for p in cand.get("content", {}).get("parts", []))
+            if not text.strip():
+                last = f"{model}: 空の応答（{cand.get('finishReason')}）"
+                continue
+            # 音声で聴くので、記号は出力後に機械的に落とす（プロンプトでは残る）
+            text = clean_for_speech(text).strip()
+            if "図表はありません" in text[:60]:
+                # 読めなかったのではなく、説明すべき図表が無い資料だった。
+                # 失敗と同じ扱いにすると、原因を追うときに紛れる
+                return {"ok": False, "text": "", "reason": "図表が無い資料"}
+            if len(text) < 100:
+                last = f"{model}: 説明が短すぎる（{len(text)}字）"
+                continue
+            return {"ok": True, "text": text, "reason": ""}
+        except Exception as e:
+            last = f"{model}: {type(e).__name__}: {str(e)[:100]}"
+    return {"ok": False, "text": "", "reason": last}
 
 
 def extract_summary(full_text: str) -> str:

@@ -137,9 +137,23 @@ def build_properties(url: str, title: str, category: str = "", tags: list = None
 # 著作権に配慮して全文は保存せず、要約・レポートの材料になる範囲に留める
 EXCERPT_LIMIT = 3000
 
+# こちらが生成した説明文（PDFの図表・グラフの読み取りなど）の上限。
+# **原文の抜粋とは別に数える。** 上の枠が守っているのは「原文を丸ごと
+# 保存しないこと」であって、こちらが書いた説明文はその複製ではない。
+# 図表を1つずつ言葉にすると原文の抜粋より長くなるので、枠を分けないと
+# 説明が途中で切れるか、原文が1字も残らないかのどちらかになる。
+NOTE_LIMIT = 6000
 
-def build_excerpt_blocks(summary: list = None, excerpt: str = "") -> list:
-    """ページ本文ブロック（要約コールアウト＋本文抜粋の段落）を組み立てる"""
+
+def build_excerpt_blocks(summary: list = None, excerpt: str = "",
+                         note: str = "") -> list:
+    """
+    ページ本文ブロック（要約コールアウト＋説明＋本文抜粋の段落）を組み立てる。
+
+    note はこちらが生成した説明文（PDFの図表の読み取りなど）。
+    **原文の抜粋より先に置く。** レポートが材料にするのは先頭からなので、
+    後ろに付けると図表の話が届かない。
+    """
     children = []
     if summary:
         text = "\n".join(summary)[:1900]
@@ -151,16 +165,20 @@ def build_excerpt_blocks(summary: list = None, excerpt: str = "") -> list:
                 "icon": {"type": "emoji", "emoji": "📝"},
             },
         })
-    if excerpt:
-        body = excerpt[:EXCERPT_LIMIT]
-        # Notion のブロック上限（2000字）に合わせて分割する
-        for i in range(0, len(body), 1900):
+    # Notion のブロック上限（2000字）に合わせて分割する
+    def add_paragraphs(text: str) -> None:
+        for i in range(0, len(text), 1900):
             children.append({
                 "object": "block",
                 "type": "paragraph",
                 "paragraph": {"rich_text": [
-                    {"type": "text", "text": {"content": body[i:i + 1900]}}]},
+                    {"type": "text", "text": {"content": text[i:i + 1900]}}]},
             })
+
+    if note:
+        add_paragraphs(note[:NOTE_LIMIT])
+    if excerpt:
+        add_paragraphs(excerpt[:EXCERPT_LIMIT])
     return children
 
 
@@ -173,6 +191,7 @@ def save_to_notion(
     tags: list = None,
     summary: list = None,
     excerpt: str = "",
+    note: str = "",
     original_url: str = "",
 ) -> str:
     """
@@ -187,6 +206,7 @@ def save_to_notion(
         tags:         タグのリスト（省略可）
         summary:      3行要約（省略可。ページ本文のコールアウトとして書き込む）
         excerpt:      本文抜粋（省略可。段落ブロックとして書き込む）
+        note:         こちらが生成した説明（省略可。PDFの図表の読み取りなど）
         original_url: 元記事URL（SmartNews等の場合。プロパティに保存）
 
     Returns:
@@ -200,7 +220,7 @@ def save_to_notion(
         properties[ORIGINAL_URL_PROPERTY] = {"url": original_url}
 
     page_data = {"parent": {"database_id": database_id}, "properties": properties}
-    children = build_excerpt_blocks(summary, excerpt)
+    children = build_excerpt_blocks(summary, excerpt, note)
     if children:
         page_data["children"] = children
 

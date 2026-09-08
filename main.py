@@ -16,6 +16,7 @@ main.py - News Cheker サーバー（FastAPI）
 """
 
 import os
+import io
 import json
 import re
 import struct
@@ -186,46 +187,80 @@ def _extract_meta(html: str, prop_patterns: list) -> str:
 LOGIN_WALL_RE = re.compile(r"/(login|signin|sign_in|accounts/login)\b", re.IGNORECASE)
 
 
-def _download(url: str, max_bytes: int = 400000, timeout: int = 12) -> tuple:
+# PDF はページを丸ごと読み込むので、大きすぎるものは諦める。
+# Render の無料プランはメモリ512MBしかない。
+PDF_MAX_BYTES = 8000000
+PDF_MAX_PAGES = 40
+
+
+def looks_like_pdf(raw: bytes, content_type: str = "", url: str = "") -> bool:
     """
-    URL の HTML を charset を考慮して取得する。
+    中身が PDF かどうかを見る。
+
+    拡張子だけで判定しない。PDF は `/download?id=…` のような
+    拡張子の無いURLで配られることが多い。先頭のバイト列がいちばん確実。
+    """
+    if raw[:5] == b"%PDF-":
+        return True
+    if "application/pdf" in (content_type or "").lower():
+        return True
+    return (url or "").lower().split("?")[0].endswith(".pdf")
+
+
+def _download_raw(url: str, max_bytes: int = 400000, timeout: int = 12) -> tuple:
+    """
+    URL の中身をバイト列のまま取得する。
 
     Returns:
-        (html, 最終URL)。失敗時は ("", "")
+        (バイト列, Content-Type, 最終URL)。失敗時は (b"", "", "")
     """
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
         })
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            final_url = resp.geturl()
-            content_type = resp.headers.get("Content-Type", "")
-            charset_match = re.search(r"charset=([\w-]+)", content_type)
-            charset = charset_match.group(1) if charset_match else None
-            raw = resp.read(max_bytes)
-
-        if not charset:
-            meta_match = re.search(
-                rb'<meta[^>]+charset=["\']?([\w-]+)', raw, re.IGNORECASE)
-            charset = meta_match.group(1).decode("ascii", errors="ignore") if meta_match else "utf-8"
-
-        return raw.decode(charset, errors="ignore"), final_url
+            return (resp.read(max_bytes),
+                    resp.headers.get("Content-Type", ""),
+                    resp.geturl())
     except Exception:
-        return "", ""
+        return b"", "", ""
 
 
-def _download_html(url: str, max_bytes: int = 400000, timeout: int = 12) -> str:
+def _decode_html(raw: bytes, content_type: str) -> str:
+    """バイト列を charset を考慮して文字列にする"""
+    charset_match = re.search(r"charset=([\w-]+)", content_type or "")
+    charset = charset_match.group(1) if charset_match else None
+    if not charset:
+        meta_match = re.search(
+            rb'<meta[^>]+charset=["\']?([\w-]+)', raw, re.IGNORECASE)
+        charset = meta_match.group(1).decode("ascii", errors="ignore") if meta_match else "utf-8"
+    try:
+        return raw.decode(charset, errors="ignore")
+    except LookupError:
+        # 知らない charset 名が書かれていることがある。utf-8 で読み直す
+        return raw.decode("utf-8", errors="ignore")
+
+
+def _html_from(raw: bytes, content_type: str, final_url: str) -> str:
     """
-    記事ページの HTML を取得する。失敗時は空文字。
+    取得した中身を HTML の文字列にする。記事として使えないものは空にする。
 
     ログイン画面に飛ばされた場合も空文字を返す。ログイン画面にも
     og:title などは付いているので、そのまま使うと
     「このページを見るには、ログインまたは登録してください」が
     記事の題名として保存されてしまう。
+
+    PDF もここでは空にする。文字として復号しても圧縮データが
+    文字化けして残るだけで、本文は1字も取れない（実測で0字）。
+    PDF は read_pdf_document が扱う。
     """
-    html, final_url = _download(url, max_bytes, timeout)
+    if not raw:
+        return ""
+    if looks_like_pdf(raw, content_type, final_url):
+        return ""
     if final_url and LOGIN_WALL_RE.search(final_url):
         return ""
+    html = _decode_html(raw, content_type)
     # リダイレクトせずにログイン画面を返してくる場合もある。
     # ただしパスワード欄の有無で判定すると、記事の読めるサイトでも
     # ヘッダーのログイン欄に反応してしまう（GIGAZINE で確認）。
@@ -233,6 +268,85 @@ def _download_html(url: str, max_bytes: int = 400000, timeout: int = 12) -> str:
     if html and re.search(r'id="login_form"', html[:200000], re.IGNORECASE):
         return ""
     return html
+
+
+def _download_html(url: str, max_bytes: int = 400000, timeout: int = 12) -> str:
+    """記事ページの HTML を取得する。失敗時は空文字。"""
+    return _html_from(*_download_raw(url, max_bytes, timeout))
+
+
+def extract_pdf_text(raw: bytes) -> dict:
+    """
+    PDF のバイト列から文字を取り出す。
+
+    「開けなかった」と「文字が入っていない」を区別して返す。
+    紙をスキャンして作られた PDF は文字を持たないので、ここでは0字になる。
+    そのときは図表の読み取り（gemini_client.describe_pdf）が本文の代わりになる。
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return {"ok": False, "text": "", "title": "", "pages": 0,
+                "reason": "pypdf が入っていない"}
+
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+        total = len(reader.pages)
+        chunks = [(page.extract_text() or "") for page in reader.pages[:PDF_MAX_PAGES]]
+        try:
+            meta = reader.metadata
+            title = (meta.title or "").strip() if meta else ""
+        except Exception:
+            title = ""  # メタデータが壊れていても本文は使える
+    except Exception as e:
+        return {"ok": False, "text": "", "title": "", "pages": 0,
+                "reason": f"PDFを開けない: {type(e).__name__}: {str(e)[:80]}"}
+
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(chunks)).strip()
+    if len(text) < 100:
+        return {"ok": False, "text": "", "title": title, "pages": total,
+                "reason": f"文字が入っていない（{total}ページ・画像として作られたPDFの可能性）"}
+    return {"ok": True, "text": text, "title": title, "pages": total, "reason": ""}
+
+
+def read_pdf_document(url: str, raw: bytes, truncated: bool) -> dict:
+    """
+    PDF から本文と図表の説明を作る。
+
+    pypdf が取り出せるのは文字だけで、グラフや図は画像なので読めない。
+    そこで PDF そのものを Gemini にも渡し、図表の中身を文章にしてもらう。
+
+    **役割を分ける。** 本文は pypdf の原文、図表の説明はモデルが書いたもの。
+    同じ資料なので、放っておくと説明側が本文の要約まで書いて二重になる。
+    本文が取れたかどうかを渡して、取れているなら図表だけを書かせる。
+
+    Returns:
+        {"title", "note"（図表の説明）, "body"（原文）, "pages", "reason"}
+    """
+    if truncated:
+        # 途中で切れた PDF は壊れていて開けない。上限を上げて取り直す
+        raw, content_type, final_url = _download_raw(url, max_bytes=PDF_MAX_BYTES)
+        if not raw or not looks_like_pdf(raw, content_type, final_url or url):
+            return {"title": "", "note": "", "body": "", "pages": 0,
+                    "reason": "大きいPDFの取り直しに失敗した"}
+
+    text = extract_pdf_text(raw)
+    figures = gemini_client.describe_pdf(raw, has_text=text["ok"])
+
+    reasons = []
+    if not figures["ok"]:
+        reasons.append(f"図表: {figures['reason']}")
+    if not text["ok"]:
+        reasons.append(f"本文: {text['reason']}")
+
+    note = ""
+    if figures["ok"]:
+        # スキャンPDFでは、この説明が本文の代わりになる
+        label = "【図表・グラフの説明】" if text["ok"] else "【PDFの読み取り】"
+        note = f"{label}\n{figures['text']}"
+
+    return {"title": text["title"], "note": note, "body": text["text"],
+            "pages": text["pages"], "reason": " / ".join(reasons)}
 
 
 SMARTNEWS_HOST_RE = re.compile(r"https?://(?:www\.|l\.)?smartnews\.com/")
@@ -461,7 +575,8 @@ def fetch_meta(url: str) -> dict:
         {"title", "description", "body", "original_url", "site"}
         （取れなかった項目は空文字）
     """
-    empty = {"title": "", "description": "", "body": "", "original_url": "", "site": ""}
+    empty = {"title": "", "description": "", "body": "", "note": "",
+             "original_url": "", "site": ""}
 
     x_post = fetch_x_post(url)
     if x_post:
@@ -475,7 +590,23 @@ def fetch_meta(url: str) -> dict:
         target = original_url = sn["url"]
         site = sn["site"]
 
-    html = _download_html(target)
+    raw, content_type, final_url = _download_raw(target)
+
+    if raw and looks_like_pdf(raw, content_type, final_url or target):
+        # 400KB で切れていたら、取り直しが要る（途中までの PDF は開けない）
+        pdf = read_pdf_document(target, raw, truncated=len(raw) >= 400000)
+        if pdf["body"] or pdf["note"]:
+            why = f" / {pdf['reason']}" if pdf["reason"] else ""
+            print(f"[pdf] {pdf['pages']}ページ / 本文{len(pdf['body'])}字"
+                  f" / 図表{len(pdf['note'])}字{why}")
+            return {**empty, "title": pdf["title"], "body": pdf["body"],
+                    "note": pdf["note"], "original_url": original_url, "site": site}
+        # 本文も図表も取れなかった。なぜ空なのかを残す（黙って0字にしない）
+        print(f"[pdf] 読み取れず: {pdf['reason']}")
+        return {**empty, "title": pdf["title"],
+                "original_url": original_url, "site": site}
+
+    html = _html_from(raw, content_type, final_url)
     from_smartnews_preview = False
     if not html and original_url:
         # 元記事がボットを拒否している場合でも、SmartNews のページには
@@ -507,7 +638,8 @@ def fetch_meta(url: str) -> dict:
         body = description
 
     return {"title": title, "description": description[:1000],
-            "body": body, "original_url": original_url, "site": site}
+            "body": body, "note": "",
+            "original_url": original_url, "site": site}
 
 
 def fetch_title(url: str) -> str:
@@ -706,9 +838,13 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
     # タイトルと本文を取得（X は oEmbed、SmartNews は元記事を解決して本文まで取る）
     # リンクが無い投稿は取りに行く先が無いので、共有された本文だけで組み立てる
     meta = fetch_meta(url) if url else {
-        "title": "", "description": "", "body": "", "original_url": "", "site": ""}
+        "title": "", "description": "", "body": "", "note": "",
+        "original_url": "", "site": ""}
     # 要約の材料は 本文 > 共有テキスト > description の順に良い
     context = meta["body"] or context_hint or meta["description"]
+    # PDFの図表の説明。原文とは別に保存するが、分類と要約には両方使う
+    note = meta.get("note", "")
+    material = "\n\n".join(p for p in (note, context) if p).strip()
 
     # ページが読めない SNS 投稿でも、共有された本文の書き出しを題名にすれば
     # ドメイン名だけの「www.facebook.com」よりは中身が分かる
@@ -719,7 +855,7 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
     category, tags, summary = "", [], []
     try:
         notion_writer.ensure_properties(token, database_id)
-        result = gemini_client.classify(title, url, context)
+        result = gemini_client.classify(title, url, material)
         if result["ok"]:
             category, tags, summary = result["category"], result["tags"], result["summary"]
             # 本文をコピーした共有では、題名が何行目に来るかが媒体ごとに違う
@@ -732,13 +868,13 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
                 if result["title_composed"]:
                     tags = tags + [COMPOSED_TITLE_TAG]
         else:
-            print(f"[WARN] 分類できませんでした（未分類で保存します）: {(title or context)[:40]}")
+            print(f"[WARN] 分類できませんでした（未分類で保存します）: {(title or material)[:40]}")
     except Exception as e:
         print(f"[WARN] 分類をスキップしました: {type(e).__name__}: {e}")
 
     # モデルが題名を出せなかったときだけ、本文の先頭行に落とす
-    if not title and context:
-        title = _title_from_text(context)
+    if not title and material:
+        title = _title_from_text(material)
     title = title or _fallback_title(url)
 
     # 抜粋として残すのは分類に使ったものと同じ材料にする。
@@ -747,7 +883,7 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
     notion_url = notion_writer.save_to_notion(
         url, title, token, database_id,
         category=category, tags=tags, summary=summary,
-        excerpt=context, original_url=meta["original_url"],
+        excerpt=context, note=note, original_url=meta["original_url"],
     )
     return {"duplicate": False, "notion_url": notion_url, "title": title,
             "category": category, "tags": tags, "summary": summary}

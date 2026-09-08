@@ -1,2 +1,4 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
+# Text of PDF documents; the figures are read by gemini_client.describe_pdf
+pypdf==6.13.2
