@@ -188,8 +188,10 @@ LOGIN_WALL_RE = re.compile(r"/(login|signin|sign_in|accounts/login)\b", re.IGNOR
 
 
 # PDF はページを丸ごと読み込むので、大きすぎるものは諦める。
-# Render の無料プランはメモリ512MBしかない。
-PDF_MAX_BYTES = 8000000
+# Render の無料プランはメモリ512MBしかないが、これは1リクエストあたりの
+# 上限なので20MB程度なら余裕がある。8MBだと実測で不足した
+# （Googleの資料が11.9MBあり、8MBで切って開けなかった）。
+PDF_MAX_BYTES = 20000000
 PDF_MAX_PAGES = 40
 
 
