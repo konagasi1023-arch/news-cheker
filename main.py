@@ -186,6 +186,30 @@ def _extract_meta(html: str, prop_patterns: list) -> str:
 # ログインを要求された先のURL。ここに飛ばされたページの中身は記事ではない
 LOGIN_WALL_RE = re.compile(r"/(login|signin|sign_in|accounts/login)\b", re.IGNORECASE)
 
+# LinkedIn の「これはLinkedIn上のリンクではありません」外部リンク警告ページで、
+# 本当の行き先を指すボタン。lnkd.in の短縮リンクも linkedin.com/safety/go も
+# 最終的にこの警告ページに着地することがある（実測：クリック先は本文が読める）。
+LINKEDIN_EXTERNAL_LINK_RE = re.compile(
+    r'data-tracking-control-name="external_url_click"[^>]*href="([^"]+)"')
+
+
+def _extract_linkedin_redirect_target(html: str) -> str:
+    """LinkedInの外部リンク警告ページから、埋め込まれた本当の行き先URLを取り出す"""
+    m = LINKEDIN_EXTERNAL_LINK_RE.search(html)
+    return html_module.unescape(m.group(1)) if m else ""
+
+
+def _unwrap_linkedin_safety_url(url: str) -> str:
+    """
+    `linkedin.com/safety/go/?url=...` は直接取得すると0バイトで拒否される
+    （警告ページの中身を見る以前にブロックされる）。
+    行き先はこの時点でクエリパラメータに入っているので、先に取り出しておく。
+    """
+    if "linkedin.com/safety/go" not in url:
+        return url
+    m = re.search(r"[?&]url=([^&]+)", url)
+    return urllib.parse.unquote(m.group(1)) if m else url
+
 
 # PDF はページを丸ごと読み込むので、大きすぎるものは諦める。
 # Render の無料プランはメモリ512MBしかないが、これは1リクエストあたりの
@@ -209,6 +233,15 @@ def looks_like_pdf(raw: bytes, content_type: str = "", url: str = "") -> bool:
     return (url or "").lower().split("?")[0].endswith(".pdf")
 
 
+GOOGLEBOT_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+# Googlebot を騙る間口を最初に試す（検索エンジンにだけ本文を見せるサイトが多いため）。
+# ただし Unity のように既知ボットのUAを名指しで403にするサイトもある
+# （実測：Googlebot/Bingbotは403、通常ブラウザのUAは200）。
+# そのときだけブラウザ風UAで1回だけ取り直す。
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+
+
 def _download_raw(url: str, max_bytes: int = 400000, timeout: int = 12) -> tuple:
     """
     URL の中身をバイト列のまま取得する。
@@ -216,16 +249,20 @@ def _download_raw(url: str, max_bytes: int = 400000, timeout: int = 12) -> tuple
     Returns:
         (バイト列, Content-Type, 最終URL)。失敗時は (b"", "", "")
     """
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-        })
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return (resp.read(max_bytes),
-                    resp.headers.get("Content-Type", ""),
-                    resp.geturl())
-    except Exception:
-        return b"", "", ""
+    for ua in (GOOGLEBOT_UA, BROWSER_UA):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ua})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return (resp.read(max_bytes),
+                        resp.headers.get("Content-Type", ""),
+                        resp.geturl())
+        except urllib.error.HTTPError as e:
+            if e.code != 403 or ua != GOOGLEBOT_UA:
+                return b"", "", ""
+            # 403 だけブラウザ風UAで1回だけ取り直す。続けてループへ
+        except Exception:
+            return b"", "", ""
+    return b"", "", ""
 
 
 def _decode_html(raw: bytes, content_type: str) -> str:
@@ -580,6 +617,8 @@ def fetch_meta(url: str) -> dict:
     empty = {"title": "", "description": "", "body": "", "note": "",
              "original_url": "", "site": ""}
 
+    url = _unwrap_linkedin_safety_url(url)
+
     x_post = fetch_x_post(url)
     if x_post:
         return {**empty, **x_post, "body": x_post["description"]}
@@ -617,6 +656,14 @@ def fetch_meta(url: str) -> dict:
         from_smartnews_preview = bool(html)
     if not html:
         return {**empty, "original_url": original_url, "site": site}
+
+    # lnkd.in・linkedin.com/safety/go は本文を持たず、「LinkedInの外部です」という
+    # 警告ページに行き先へのリンクだけが埋め込まれている。見つかれば追いかける。
+    real_link = _extract_linkedin_redirect_target(html)
+    if real_link:
+        real_html = _download_html(real_link)
+        if real_html:
+            html = real_html
 
     # OGタグ → twitter:title → titleタグの順で取得
     raw_title = _extract_meta(html, [
