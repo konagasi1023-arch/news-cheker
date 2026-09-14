@@ -160,6 +160,88 @@ PDF_TIMEOUT = 300
 # 図表を1つずつ言葉にすると長くなる。3,000 だと途中で切れる
 PDF_MAX_OUTPUT_TOKENS = 8000
 
+# リクエストに直接埋め込める（inlineData）のは、リクエスト全体で 20MB まで。
+# base64 で 4/3 に膨らむので、元のファイルは 15MB が実質の上限。
+# これを超える PDF は Files API に先にアップロードし、URI で参照して読ませる
+# （2026-09-14 に 21.2MB の Google の資料で実測。埋め込みでは送れなかった）。
+INLINE_MAX_BYTES = 15_000_000
+FILES_API_BASE = "https://generativelanguage.googleapis.com"
+# アップロード後、Gemini 側の下処理が終わる（ACTIVE になる）まで待つ上限
+FILE_READY_TIMEOUT = 120
+
+
+def upload_pdf_file(raw: bytes, api_key: str) -> dict:
+    """
+    PDF を Files API にアップロードし、読み取りに使える状態になるまで待つ。
+
+    無料枠でも使える（保存は 48 時間で自動削除、こちらでも読んだあと消す）。
+    失敗は理由を添えて返し、呼び出し側が「読めなかった」と分かるようにする。
+
+    Returns:
+        {"ok": bool, "name": "files/…", "uri": "https://…", "reason": ""}
+    """
+    fail = {"ok": False, "name": "", "uri": "", "reason": ""}
+    start_url = f"{FILES_API_BASE}/upload/v1beta/files?key={api_key}"
+    try:
+        # 1. 再開可能アップロードを開始し、アップロード先 URL をもらう
+        req = urllib.request.Request(
+            start_url,
+            data=json.dumps({"file": {"display_name": "news-checker.pdf"}}).encode("utf-8"),
+            headers={
+                "X-Goog-Upload-Protocol": "resumable",
+                "X-Goog-Upload-Command": "start",
+                "X-Goog-Upload-Header-Content-Length": str(len(raw)),
+                "X-Goog-Upload-Header-Content-Type": "application/pdf",
+                "Content-Type": "application/json",
+            }, method="POST")
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            upload_url = resp.headers.get("X-Goog-Upload-URL", "")
+        if not upload_url:
+            return {**fail, "reason": "アップロード先URLが返ってこない"}
+
+        # 2. 中身を1回で送って確定させる
+        req = urllib.request.Request(
+            upload_url, data=raw,
+            headers={
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+                "Content-Length": str(len(raw)),
+            }, method="POST")
+        with urllib.request.urlopen(req, timeout=PDF_TIMEOUT) as resp:
+            info = json.loads(resp.read().decode("utf-8")).get("file") or {}
+        name, uri = info.get("name", ""), info.get("uri", "")
+        if not (name and uri):
+            return {**fail, "reason": f"アップロード応答に name/uri が無い: {str(info)[:120]}"}
+
+        # 3. 下処理が終わるまで待つ（PDF は PROCESSING を経て ACTIVE になる）
+        deadline = time.time() + FILE_READY_TIMEOUT
+        state = info.get("state", "")
+        while state != "ACTIVE":
+            if state == "FAILED":
+                return {**fail, "reason": "Gemini 側でファイルの処理に失敗した"}
+            if time.time() > deadline:
+                return {**fail, "reason": f"{FILE_READY_TIMEOUT}秒待っても ACTIVE にならない（{state}）"}
+            time.sleep(3)
+            req = urllib.request.Request(f"{FILES_API_BASE}/v1beta/{name}?key={api_key}")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                state = json.loads(resp.read().decode("utf-8")).get("state", "")
+        return {"ok": True, "name": name, "uri": uri, "reason": ""}
+    except urllib.error.HTTPError as e:
+        return {**fail, "reason": f"HTTP {e.code}: {e.read().decode('utf-8', 'ignore')[:120]}"}
+    except Exception as e:
+        return {**fail, "reason": f"{type(e).__name__}: {str(e)[:100]}"}
+
+
+def delete_file(name: str, api_key: str) -> None:
+    """アップロードした一時ファイルを消す。消せなくても 48 時間で自動削除される"""
+    try:
+        req = urllib.request.Request(
+            f"{FILES_API_BASE}/v1beta/{name}?key={api_key}", method="DELETE")
+        with urllib.request.urlopen(req, timeout=30):
+            pass
+    except Exception:
+        pass
+
 # 本文の文章は pypdf が原文のまま取れるので、こちらでは繰り返させない。
 # 繰り返すと同じ資料を二重に持つことになり、聴くときも同じ話が2回出てくる。
 FIGURES_PROMPT = """これはPDFの資料です。音声で聴く人に向けて、
@@ -212,10 +294,22 @@ def describe_pdf(raw: bytes, has_text: bool = True) -> dict:
     if not api_key:
         return {"ok": False, "text": "", "reason": "GEMINI_API_KEY が設定されていない"}
 
+    # 小さい PDF はリクエストに埋め込む。大きいものは先にアップロードして URI で渡す
+    uploaded = None
+    if len(raw) <= INLINE_MAX_BYTES:
+        pdf_part = {"inlineData": {"mimeType": "application/pdf",
+                                   "data": base64.b64encode(raw).decode("ascii")}}
+    else:
+        uploaded = upload_pdf_file(raw, api_key)
+        if not uploaded["ok"]:
+            return {"ok": False, "text": "",
+                    "reason": f"{len(raw) // 1_000_000}MB のアップロードに失敗: {uploaded['reason']}"}
+        pdf_part = {"fileData": {"mimeType": "application/pdf",
+                                 "fileUri": uploaded["uri"]}}
+
     payload = {
         "contents": [{"role": "user", "parts": [
-            {"inlineData": {"mimeType": "application/pdf",
-                            "data": base64.b64encode(raw).decode("ascii")}},
+            pdf_part,
             {"text": FIGURES_PROMPT if has_text else FULLTEXT_PROMPT},
         ]}],
         # 検索は付けない。PDF の中身を読むだけなので要らず、待ち時間が延びるだけ
@@ -224,6 +318,15 @@ def describe_pdf(raw: bytes, has_text: bool = True) -> dict:
     }
     body = json.dumps(payload).encode("utf-8")
 
+    try:
+        return _describe_pdf_with(body, api_key)
+    finally:
+        if uploaded:
+            delete_file(uploaded["name"], api_key)
+
+
+def _describe_pdf_with(body: bytes, api_key: str) -> dict:
+    """組み立て済みのリクエストでモデルを順に試す（describe_pdf の本体）"""
     last = "理由不明"
     for model in [GEMINI_MODEL] + CLASSIFY_MODELS:
         try:

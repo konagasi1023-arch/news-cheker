@@ -212,11 +212,16 @@ def _unwrap_linkedin_safety_url(url: str) -> str:
 
 
 # PDF はページを丸ごと読み込むので、大きすぎるものは諦める。
-# Render の無料プランはメモリ512MBしかないが、これは1リクエストあたりの
-# 上限なので20MB程度なら余裕がある。8MBだと実測で不足した
-# （Googleの資料が11.9MBあり、8MBで切って開けなかった）。
-PDF_MAX_BYTES = 20000000
+# Render の無料プランはメモリ512MBはプロセス全体の上限なので、50MB を
+# 1本読む分には余裕がある。上限は実測で2回引き上げた：
+#   8MB  → 11.9MB の Google の資料が開けなかった（2026-09-08）
+#   20MB → 21.2MB の Google の資料が開けなかった（2026-09-14）
+# 15MB を超えると Gemini には埋め込めないが、gemini_client が Files API に
+# 切り替えるので図表の説明も付く。
+PDF_MAX_BYTES = 50_000_000
 PDF_MAX_PAGES = 40
+# 大きい PDF の取り直しは 12 秒では終わらないことがある
+PDF_DOWNLOAD_TIMEOUT = 120
 
 
 def looks_like_pdf(raw: bytes, content_type: str = "", url: str = "") -> bool:
@@ -364,10 +369,16 @@ def read_pdf_document(url: str, raw: bytes, truncated: bool) -> dict:
     """
     if truncated:
         # 途中で切れた PDF は壊れていて開けない。上限を上げて取り直す
-        raw, content_type, final_url = _download_raw(url, max_bytes=PDF_MAX_BYTES)
+        raw, content_type, final_url = _download_raw(
+            url, max_bytes=PDF_MAX_BYTES, timeout=PDF_DOWNLOAD_TIMEOUT)
         if not raw or not looks_like_pdf(raw, content_type, final_url or url):
             return {"title": "", "note": "", "body": "", "pages": 0,
                     "reason": "大きいPDFの取り直しに失敗した"}
+        if len(raw) >= PDF_MAX_BYTES:
+            # 上限で切れている。pypdf は「Root が無い」と言うだけで
+            # 大きさが原因だとは分からないので、ここで名指しにする
+            return {"title": "", "note": "", "body": "", "pages": 0,
+                    "reason": f"PDFが上限 {PDF_MAX_BYTES // 1_000_000}MB より大きい"}
 
     text = extract_pdf_text(raw)
     figures = gemini_client.describe_pdf(raw, has_text=text["ok"])
