@@ -499,6 +499,15 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
         # 全モデルが割り当て切れなら、呼び出し側が処理を止められるようにする
         return {**fallback, "quota_exceeded": exhausted == len(CLASSIFY_MODELS)}
 
+    # モデルは辞書1つを返す約束だが、たまに `[{...}]` のように配列で包んで返す
+    # （2026-09-14 に実測。辞書として読もうとして落ち、レポート生成ごと止まった）。
+    # 配列なら中の辞書を取り出す。辞書が見つからなければ「分類できず」として返す。
+    if isinstance(data, list):
+        data = next((d for d in data if isinstance(d, dict)), None)
+    if not isinstance(data, dict):
+        print(f"[classify] 応答の形が違う（{type(data).__name__}）: {title[:40]}")
+        return fallback
+
     category = data.get("category", "")
     if category not in CATEGORIES:
         category = FALLBACK_CATEGORY
