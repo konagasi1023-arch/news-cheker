@@ -222,6 +222,26 @@ def run(args) -> int:
 
     usable, dropped = gemini_client.usable_articles(articles)
     print(f"対象 {len(usable)}件（落とした {dropped}件）")
+    # 落としたものは必ず名前つきで出す。件数だけでは、本文のある記事が
+    # 消えていても気づけない（2026-09-15 に2件が黙って消えた）。
+    kept = {id(a) for a in usable}
+    unreadable = 0
+    for a in articles:
+        if id(a) in kept:
+            continue
+        if a.get("read_failed"):
+            why, unreadable = "本文を読めなかった", unreadable + 1
+        elif not (a.get("excerpt") or "").strip():
+            why = "本文なし"
+        else:
+            why = "重複"
+        print(f"  落とした（{why}）: {a['title'][:50]}")
+    if unreadable:
+        # 読めなかった記事は材料があるかもしれない。落としたまま作ると
+        # その記事は次回も拾われず、永久に消える。作らずに止める。
+        print(f"[中止] 本文を読めなかった記事が {unreadable}件あります。"
+              "時間をおいて再実行してください。")
+        return 1
     describe(usable)
     if not usable:
         print("解説できる材料のある記事がありません。")

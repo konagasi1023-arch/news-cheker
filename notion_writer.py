@@ -8,6 +8,7 @@ notion_writer.py - Notion API 統合（News Cheker データベースへの書�
 
 import json
 import os
+import time
 import urllib.request
 import urllib.error
 import re
@@ -18,9 +19,16 @@ JST = timezone(timedelta(hours=9))
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_API_VERSION = "2022-06-28"
 
+# Notion は平均 3 リクエスト/秒を超えると 429 を返す。本文の読み取りは
+# 1件1リクエストなので、89件を休みなく読むと途中で当たる
+# （2026-09-15 に実測。2件の本文が空になり、レポートから黙って消えた）。
+# 429 と 5xx は待って取り直す。日次上限ではないので、待てば通る。
+RETRY_STATUSES = (429, 500, 502, 503, 504)
+MAX_ATTEMPTS = 4
+
 
 def notion_request(method: str, endpoint: str, token: str, data: dict = None) -> dict:
-    """Notion API にリクエストを送る"""
+    """Notion API にリクエストを送る。429 / 5xx は待って取り直す"""
     url = f"{NOTION_API_BASE}{endpoint}"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -28,15 +36,23 @@ def notion_request(method: str, endpoint: str, token: str, data: dict = None) ->
         "Notion-Version": NOTION_API_VERSION,
     }
     body = json.dumps(data).encode("utf-8") if data else None
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        raise RuntimeError(f"Notion HTTP {e.code}: {error_body}")
-    except Exception as e:
-        raise RuntimeError(f"Notion request failed: {e}")
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8")
+            if e.code in RETRY_STATUSES and attempt < MAX_ATTEMPTS:
+                try:
+                    wait = float(e.headers.get("Retry-After") or 0)
+                except ValueError:
+                    wait = 0
+                time.sleep(wait or 2 * attempt)
+                continue
+            raise RuntimeError(f"Notion HTTP {e.code}: {error_body}")
+        except Exception as e:
+            raise RuntimeError(f"Notion request failed: {e}")
 
 
 def extract_page_id(value: str) -> str:
@@ -326,8 +342,13 @@ def fetch_recent_articles(token: str, database_id: str, days: int,
                         r.get("plain_text", "")
                         for r in blk["paragraph"].get("rich_text", [])))
             item["excerpt"] = "\n".join(p for p in paragraphs if p.strip())
-        except Exception:
-            pass  # 要約が読めなくてもレポートは作れる
+        except Exception as e:
+            # 「読めなかった」と「本文が無かった」は別のこと。黙って空にすると
+            # 本文のある記事が「材料なし」として落ち、レポートから消える
+            # （2026-09-15 に2件で実際に起きた）。印を付けて呼び出し側に知らせる。
+            item["read_failed"] = True
+            print(f"[warn] 本文を読めませんでした: {item['title'][:50]}: "
+                  f"{type(e).__name__}: {str(e)[:80]}")
 
     return articles
 
