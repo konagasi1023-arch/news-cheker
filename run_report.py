@@ -261,18 +261,28 @@ def run(args) -> int:
 
     date_str = datetime.now(notion_writer.JST).strftime("%Y-%m-%d")
     title = f"📊 {kind}レポート {date_str}（{len(usable)}件）"
-    notion_url = notion_writer.save_report(title, report_text, token, database_id)
-    print(f"\n{title}\n{notion_url}")
 
+    # 原稿は生成に20分・Gemini 20回を使う。**Notion より先に vault へ書く。**
+    # 以前は Notion の保存が先で、そこで落ちると原稿ごと消えた（2026-09-19、413）。
     outdir = os.path.join(args.vault, REPORTS_SUBDIR)
     os.makedirs(outdir, exist_ok=True)
     path = unique_path(os.path.join(outdir, f"{kind}レポート_{date_str}_音声用.md"))
     with open(path, "w", encoding="utf-8") as f:
         f.write(report_text + "\n")
     minutes = len(report_text) // split_report.CHARS_PER_MINUTE
-    print(f"{path}\n{len(report_text):,}字（読み上げ約{minutes}分）\n")
+    print(f"\n{path}\n{len(report_text):,}字（読み上げ約{minutes}分）\n")
 
     split_report.run(path, args.minutes)
+
+    # Notion のページは次回の切り取り位置にもなる。保存に失敗したら、次回は
+    # 同じ記事がもう一度対象に入る（取りこぼすより安全）。原稿は vault に残っている。
+    try:
+        notion_url = notion_writer.save_report(title, report_text, token, database_id)
+    except Exception as e:
+        print(f"\n[注意] Notion への保存に失敗: {type(e).__name__}: {str(e)[:200]}")
+        print(f"  原稿と分割は vault に保存済み: {path}")
+        return 1
+    print(f"\n{title}\n{notion_url}")
     return 0
 
 

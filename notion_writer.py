@@ -35,7 +35,9 @@ def notion_request(method: str, endpoint: str, token: str, data: dict = None) ->
         "Content-Type": "application/json",
         "Notion-Version": NOTION_API_VERSION,
     }
-    body = json.dumps(data).encode("utf-8") if data else None
+    # ensure_ascii=False にする。既定だと日本語が \uXXXX（1文字6バイト）に膨らみ、
+    # UTF-8（3バイト）の倍の大きさで送ることになる（413 の一因だった）
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8") if data else None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
@@ -379,14 +381,42 @@ def save_report(title: str, body_text: str, token: str, database_id: str) -> str
         "object": "block",
         "type": "paragraph",
         "paragraph": {"rich_text": [{"type": "text", "text": {"content": b[:1990]}}]},
-    } for b in blocks[:90]]
+    } for b in blocks]
 
+    # 1回で送れるのはブロック100個・本体500KBまで。以前は先頭90ブロックだけ送って
+    # 残りを黙って捨てていた。115件・約9万字の日に本体が上限を超えて 413 で落ちた
+    # （2026-09-19）。ページは先頭の束で作り、残りは同じ上限で追記していく。
+    batches = _batch_blocks(children)
     page = notion_request("POST", "/pages", token, {
         "parent": {"database_id": database_id},
         "properties": properties,
-        "children": children,
+        "children": batches[0] if batches else [],
     })
+    for batch in batches[1:]:
+        notion_request("PATCH", f"/blocks/{page['id']}/children", token,
+                       {"children": batch})
     return f"https://www.notion.so/{page['id'].replace('-', '')}"
+
+
+# Notion API の上限（ブロック100個／本体500KB）より少し内側に置く
+MAX_BLOCKS_PER_REQUEST = 90
+MAX_BYTES_PER_REQUEST = 350_000
+
+
+def _batch_blocks(children: list) -> list:
+    """ブロックを、1リクエストの上限に収まる束に分ける"""
+    batches, current, size = [], [], 0
+    for blk in children:
+        n = len(json.dumps(blk, ensure_ascii=False).encode("utf-8"))
+        if current and (len(current) >= MAX_BLOCKS_PER_REQUEST
+                        or size + n > MAX_BYTES_PER_REQUEST):
+            batches.append(current)
+            current, size = [], 0
+        current.append(blk)
+        size += n
+    if current:
+        batches.append(current)
+    return batches
 
 
 def get_credentials() -> tuple:
