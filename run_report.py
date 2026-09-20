@@ -11,7 +11,7 @@ run_report.py - 保存記事から音声用レポートを作るまでを一本�
       → カテゴリ別に生成（検算つき）
       → Notion に保存
       → vault に音声用テキストを書き出す
-      → 20分ごとに分割（1パート10件前後。上限は split_report.DEFAULT_MAX_MINUTES）
+      → 38分ごとに分割（1パート14件前後。上限は split_report.DEFAULT_MAX_MINUTES）
 
 使い方:
     python -u run_report.py --dry-run     # 生成せず対象だけ数える
