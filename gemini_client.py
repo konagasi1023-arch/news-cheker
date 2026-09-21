@@ -890,6 +890,24 @@ def usable_articles(articles: list) -> tuple:
     return usable, len(articles) - len(usable)
 
 
+def _drop_repeated_section(category: str, text: str) -> str:
+    """
+    1回の出力の中で、同じ区切りを丸ごと2回書いていたら2回目を落とす。
+
+    2026-09-22、AI開発・技術（2件）の呼び出しが「ここからは…の話題です」から
+    2件の解説までを2回続けて書いた。番号は振り直しで57まで伸び、検算が 55/57 になった。
+    記事は欠けていないが、同じ話を2回聴くことになる。
+    見出しが2回出たら、2回目の見出しから後ろを捨てる（1回の呼び出しに区切りは1つしか無い）。
+    """
+    header = f"ここからは{category}の話題です"
+    first = text.find(header)
+    second = text.find(header, first + 1) if first >= 0 else -1
+    if second < 0:
+        return text
+    print(f"[report] {category}: 同じ区切りが2回書かれていたので2回目を落とします")
+    return text[:second].rstrip()
+
+
 def generate_report(articles: list, label: str) -> str:
     """
     記事リストからふりかえりレポートを生成する。
@@ -936,12 +954,14 @@ def generate_report(articles: list, label: str) -> str:
             start, end = number, number + len(chunk) - 1
             number = end + 1
             try:
-                sections.append(_call_gemini(
+                sections.append(_drop_repeated_section(category, _call_gemini(
                     SECTION_PROMPT.format(
                         label=label, category=category, count=len(chunk),
                         start=start, end=end,
-                        articles=_format_articles(chunk, with_excerpt=True)[:40000]),
-                    api_key, use_search=True, max_tokens=32000))
+                        articles=_format_articles(chunk, with_excerpt=True)[:50000]),
+                    # 1記事12〜18文 × 15件だと 32000 では足りなくなる。
+                    # 途中で尽きると中身のない項目で件数を埋め始めるので余裕を持たせる。
+                    api_key, use_search=True, max_tokens=60000)))
                 print(f"[report] {category}: {start}〜{end}件目 完了")
             except Exception as e:
                 print(f"[report] {category} {start}〜{end}件目 の生成に失敗（飛ばします）: {e}")
