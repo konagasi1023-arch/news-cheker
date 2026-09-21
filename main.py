@@ -212,13 +212,14 @@ def _unwrap_linkedin_safety_url(url: str) -> str:
 
 
 # PDF はページを丸ごと読み込むので、大きすぎるものは諦める。
-# Render の無料プランはメモリ512MBはプロセス全体の上限なので、50MB を
-# 1本読む分には余裕がある。上限は実測で2回引き上げた：
+# Render の無料プランはメモリ512MBはプロセス全体の上限。上限は実測で3回引き上げた：
 #   8MB  → 11.9MB の Google の資料が開けなかった（2026-09-08）
 #   20MB → 21.2MB の Google の資料が開けなかった（2026-09-14）
-# 15MB を超えると Gemini には埋め込めないが、gemini_client が Files API に
-# 切り替えるので図表の説明も付く。
-PDF_MAX_BYTES = 50_000_000
+#   50MB → 51.1MB の Google の資料（Gemini Enterprise ガイド）が開けなかった（2026-09-22）
+# Google の配布資料は画像が多く、回を追うごとに大きくなっている。
+# 15MB を超えると Gemini には埋め込めないが、gemini_client が Files API
+# （2GBまで）に切り替えるので図表の説明も付く。
+PDF_MAX_BYTES = 100_000_000
 PDF_MAX_PAGES = 40
 # 大きい PDF の取り直しは 12 秒では終わらないことがある
 PDF_DOWNLOAD_TIMEOUT = 120
