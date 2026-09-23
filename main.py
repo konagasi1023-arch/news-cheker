@@ -566,8 +566,11 @@ class _ArticleParser(HTMLParser):
             if total < 200:
                 continue
             joined = "\n".join(texts)
-            # 句点が少ないものは記事一覧やナビゲーションなので採らない
-            periods = joined.count("。") + joined.count(". ")
+            # 句点が少ないものは記事一覧やナビゲーションなので採らない。
+            # 英語の文末は「. 」だけでなく、段落の最後（「.」の直後が改行か末尾）も数える。
+            # 以前は「. 」しか数えず、1〜2文の短い段落が続く英語記事（Entrepreneur.com）が
+            # 千字あたり3.4個と判定されて本文ごと捨てられていた（2026-09-24）。
+            periods = joined.count("。") + len(re.findall(r"[.!?](?=\s|$)", joined))
             if periods / total * 1000 < self.MIN_PERIODS_PER_1000:
                 continue
             # リンクだらけのコンテナは関連記事一覧なので減点する
