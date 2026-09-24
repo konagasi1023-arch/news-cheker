@@ -205,10 +205,22 @@ def _unwrap_linkedin_safety_url(url: str) -> str:
     （警告ページの中身を見る以前にブロックされる）。
     行き先はこの時点でクエリパラメータに入っているので、先に取り出しておく。
     """
-    if "linkedin.com/safety/go" not in url:
-        return url
-    m = re.search(r"[?&]url=([^&]+)", url)
-    return urllib.parse.unquote(m.group(1)) if m else url
+    if "linkedin.com/safety/go" in url:
+        m = re.search(r"[?&]url=([^&]+)", url)
+        return urllib.parse.unquote(m.group(1)) if m else url
+    # Facebook の外部リンク転送（l.facebook.com / lm.facebook.com の l.php?u=…）も同じ形。
+    # 転送ページを取りに行くとログイン画面に落ちるので、行き先を先に取り出す（2026-09-25）
+    if re.match(r"https?://(l|lm)\.facebook\.com/l\.php", url):
+        m = re.search(r"[?&]u=([^&]+)", url)
+        return urllib.parse.unquote(m.group(1)) if m else url
+    return url
+
+
+# 記事ページの読み込み上限。400KB だと、本文の手前に広告やスクリプトを大量に積む
+# ページで本文に届かない。BRIDGE（thebridge.jp）は 440KB あり、本文の <article> が
+# 424KB の位置から始まっていて、題名だけ取れて本文は0字になっていた（2026-09-25）。
+# 2MB あれば十分で、Render のメモリにも響かない。
+HTML_MAX_BYTES = 2_000_000
 
 
 # PDF はページを丸ごと読み込むので、大きすぎるものは諦める。
@@ -248,7 +260,7 @@ BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
              "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 
-def _download_raw(url: str, max_bytes: int = 400000, timeout: int = 12) -> tuple:
+def _download_raw(url: str, max_bytes: int = HTML_MAX_BYTES, timeout: int = 12) -> tuple:
     """
     URL の中身をバイト列のまま取得する。
 
@@ -315,7 +327,7 @@ def _html_from(raw: bytes, content_type: str, final_url: str) -> str:
     return html
 
 
-def _download_html(url: str, max_bytes: int = 400000, timeout: int = 12) -> str:
+def _download_html(url: str, max_bytes: int = HTML_MAX_BYTES, timeout: int = 12) -> str:
     """記事ページの HTML を取得する。失敗時は空文字。"""
     return _html_from(*_download_raw(url, max_bytes, timeout))
 
@@ -649,8 +661,8 @@ def fetch_meta(url: str) -> dict:
     raw, content_type, final_url = _download_raw(target)
 
     if raw and looks_like_pdf(raw, content_type, final_url or target):
-        # 400KB で切れていたら、取り直しが要る（途中までの PDF は開けない）
-        pdf = read_pdf_document(target, raw, truncated=len(raw) >= 400000)
+        # 読み込み上限で切れていたら、取り直しが要る（途中までの PDF は開けない）
+        pdf = read_pdf_document(target, raw, truncated=len(raw) >= HTML_MAX_BYTES)
         if pdf["body"] or pdf["note"]:
             why = f" / {pdf['reason']}" if pdf["reason"] else ""
             print(f"[pdf] {pdf['pages']}ページ / 本文{len(pdf['body'])}字"
