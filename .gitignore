@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 progress.json
+wisdom_data/
+wisdom_task.log
