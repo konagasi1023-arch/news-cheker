@@ -132,8 +132,54 @@ def fetch_article(path: str) -> dict:
         (re.search(r"<title[^>]*>(.*?)</title>", h, re.S) or [None, ""])[1]
     title = re.sub(r"\s*\|\s*Wisdom(-Beta)?\s*$", "", html.unescape(title).strip())
     body = arti_body(h) or main.extract_article_body(h)
-    return {"url": url, "date": "/".join(path.split("/")[2:5]), "title": title,
-            "body": body, "section": section_of(title), "skipped": len(body) < MIN_BODY}
+    a = {"url": url, "date": "/".join(path.split("/")[2:5]), "title": title,
+         "body": body, "section": section_of(title), "skipped": len(body) < MIN_BODY}
+    # 本文が短く YouTube が埋め込まれていれば、中身は動画。字幕から解説する
+    # （2026-09-25 に動画23本を手で動画編にした。以後の新着は毎朝ここで拾う）
+    yt = re.findall(r'(?:youtube(?:-nocookie)?\.com/embed/|youtu\.be/|watch\?v=)([\w-]{11})', h)
+    if a["skipped"] and yt:
+        tr = video_transcript(yt[0])
+        if len(tr["text"]) >= MIN_BODY:
+            a.update({"kind": "video", "youtube": yt[0], "transcript": tr["text"],
+                      "duration": tr["duration"], "video_title": tr["title"],
+                      "section": "動画", "skipped": False})
+    return a
+
+
+VIDEO_SEG_CHARS = 4300      # 字幕およそ10分ぶん
+VIDEO_LONG = 1200           # これを超える動画は区切って書かせる（1回で書かせると要約しすぎる）
+
+
+def video_transcript(vid: str) -> dict:
+    """YouTube の日本語自動字幕だけを取る（動画はダウンロードしない）。字幕ファイルは読んだら消す"""
+    import tempfile
+    import yt_dlp
+    tmp = tempfile.mkdtemp(prefix="wisdom_sub_")
+    try:
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+                "writeautomaticsub": True, "writesubtitles": True,
+                "subtitleslangs": ["ja"], "subtitlesformat": "vtt",
+                "outtmpl": os.path.join(tmp, "%(id)s.%(ext)s")}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=True)
+        vtt = next((os.path.join(tmp, f) for f in os.listdir(tmp) if f.endswith(".vtt")), "")
+        lines = []
+        if vtt:
+            for l in open(vtt, encoding="utf-8"):
+                l = re.sub(r"<[^>]+>", "", l.strip()).strip()
+                if not l or "-->" in l or l.startswith(("WEBVTT", "Kind:", "Language:")) or l.isdigit():
+                    continue
+                if not lines or l != lines[-1]:
+                    lines.append(l)
+        return {"text": "".join(lines), "duration": info.get("duration") or 0,
+                "title": info.get("title") or ""}
+    except Exception as e:
+        log(f"  [字幕を取れず] {vid}: {type(e).__name__}: {str(e)[:80]}")
+        return {"text": "", "duration": 0, "title": ""}
+    finally:
+        for f in os.listdir(tmp):
+            os.remove(os.path.join(tmp, f))
+        os.rmdir(tmp)
 
 
 def find_new_paths(db: dict) -> list:
@@ -160,10 +206,85 @@ def find_new_paths(db: dict) -> list:
 # 解説の生成
 # ---------------------------------------------------------------------------
 
+VIDEO_NOTE = """■ 文字起こしについての注意
+これは YouTube の自動字幕で、聞き取りの誤りを含みます（例：「便益」が「便疫」、「至上主義」が「市場主義」になる）。
+題名と文脈から明らかな誤りは正しい語に直して話してよい。
+ただし人名・社名・商品名・数字で確かでないものは、推測で埋めずに「聞き取れない」「紹介された企業」のように扱うこと。
+相づち・言いよどみは無視すること。
+
+このサイトで確かに使われている名前と用語（字幕が崩れていても、明らかにこれを指すときはこの表記で書く）：
+西口一希（にしぐち かずき。Strategy Partners 代表、Wisdom Evolution Company。自動字幕では「西口和克」などになる）、
+DIKWモデル（データ・情報・知識・知恵。字幕では「DIYモデル」になる）、顧客起点マーケティング、N1分析、
+5segs（ファイブセグズ）、9segs（ナインセグズ）、WHOとWHAT、良い売上・悪い売上"""
+
+VIDEO_SEG_PROMPT = """あなたは、マーケティングの実務と理論に精通した解説者です。
+以下は、マーケティングの知識サイト「Wisdom-Beta」に掲載された動画「{title}」（約{minutes}分）の
+文字起こしのうち、{i}番目／全{n}区切りです。
+
+文字起こし: {seg}
+
+この区切りで話された内容を、音声で聴いて学ぶための解説として日本語で書いてください。聴き手は**超詳細に**学びたいと考えています。
+
+""" + VIDEO_NOTE + """
+
+■ 書き方
+話し手の主張、定義、枠組み、事例、数字、問いと答えを、話された順に沿って、要約しすぎずに具体的に伝えること。
+**動画10分あたり25文から35文**。動画に無いことを足さないこと。推測は「〜と考えられます」と明示すること。
+{lead}
+番号（〇件目）・見出し・題名の読み上げは書かないこと（前後の区切りとそのままつなげるため）。
+箇条書きや記号は使わず、話し言葉の文章で書くこと。数字は読み下すこと。URLは書かないこと。"""
+
+
+def video_segments(text: str) -> list:
+    out, cur = [], ""
+    for s in re.split(r"(?<=[。？！?!])", text):
+        if len(cur) + len(s) > VIDEO_SEG_CHARS and cur:
+            out.append(cur)
+            cur = s
+        else:
+            cur += s
+    if cur.strip():
+        out.append(cur)
+    if len(out) > 1 and len(out[-1]) < VIDEO_SEG_CHARS // 3:
+        out[-2] += out.pop()
+    return out
+
+
+def generate_video(a: dict, n: int, api_key: str) -> str:
+    """動画1本を、字幕を区切って書かせてから1件にまとめる（短い動画は1区切り）"""
+    segs = video_segments(a["transcript"]) if a.get("duration", 0) > VIDEO_LONG else [a["transcript"]]
+    minutes = max(1, a.get("duration", 0) // 60)
+    body = []
+    for i, seg in enumerate(segs, 1):
+        prompt = VIDEO_SEG_PROMPT.format(
+            title=a["title"], minutes=minutes, i=i, n=len(segs), seg=seg,
+            lead=("最初の区切りなので、冒頭の一文で、この動画が誰の、何についての話なのかを紹介すること。"
+                  if i == 1 else "前の区切りから話が続いている前提で書き始めること。"))
+        for attempt in range(3):
+            try:
+                t = g._call_gemini(prompt, api_key, use_search=False, max_tokens=12000).strip()
+                if len(t) > 200:
+                    break
+            except Exception as e:
+                log(f"  [再試行] 動画 {a['title'][:30]} {i}/{len(segs)}: {type(e).__name__}")
+                time.sleep(10)
+        else:
+            raise RuntimeError(f"動画「{a['title'][:30]}」の {i}/{len(segs)} を生成できなかった")
+        body.append(re.sub(r"(?m)^\s*\d+件目", "", t))
+    return (f"ここからは動画の話題です。この分野は1件あります。\n\n"
+            f"{n}件目。「{a['title']}」（動画・約{minutes}分）\n\n" + "\n\n".join(body))
+
+
 def generate(items: list, api_key: str) -> str:
-    """items を節ごとに PER_CALL 本ずつ生成してつなげる（番号は1から。あとで振り直す）"""
+    """items を節ごとに PER_CALL 本ずつ生成してつなげる（番号は1から。あとで振り直す）。
+    動画は1本ずつ generate_video で書く"""
     parts, n, i = [], 1, 0
     while i < len(items):
+        if items[i].get("kind") == "video":
+            parts.append(generate_video(items[i], n, api_key))
+            n += 1
+            i += 1
+            continue
         sec = items[i]["section"]
         chunk = [items[i]]
         while len(chunk) < PER_CALL and i + len(chunk) < len(items) \
