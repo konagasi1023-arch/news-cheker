@@ -233,6 +233,8 @@ def run(args) -> int:
             why, unreadable = "本文を読めなかった", unreadable + 1
         elif not (a.get("excerpt") or "").strip():
             why = "本文なし"
+        elif gemini_client.is_title_only(a):
+            why = "題名だけ"
         else:
             why = "重複"
         print(f"  落とした（{why}）: {a['title'][:50]}")

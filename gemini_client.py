@@ -862,6 +862,30 @@ def _dedupe_key(article: dict) -> tuple:
             _fold(article.get("excerpt", ""), 200))
 
 
+def is_title_only(article: dict) -> bool:
+    """
+    本文として題名しか保存されていない記事かどうか。
+
+    取得を拒まれたページや JS で描画するページでは、og:title や <title> だけが
+    本文の欄に入ることがある（OpenAI ヘルプセンター33字、gartner.com 32字、
+    Mastercard のプレスリリース81字、PDF のファイル名だけ、など）。本文が0字では
+    ないので従来の除外をすり抜け、「詳しい内容までは確認できませんでした」という
+    中身のない項目になっていた（2026-09-16〜24 に数件）。2026-09-25 にユーザーが除外を決めた。
+
+    判定：記号・空白・全角半角をそろえたうえで、本文が題名と同じか、題名の一部か、
+    題名に媒体名などを30字以内で足しただけのもの。短くても中身のある書き出し
+    （Reuters の157字など）は、題名と一致しないので残る。
+    """
+    ex = _fold(article.get("excerpt", ""), 100000)
+    ti = _fold(article.get("title", ""), 100000)
+    if not ex or not ti:
+        return False
+    if ex in ti:
+        return True
+    head = ti[:40]
+    return len(head) >= 10 and ex.startswith(head) and len(ex) - len(ti) <= 30
+
+
 def usable_articles(articles: list) -> tuple:
     """
     解説できる材料がある記事だけに絞り、落とした件数と一緒に返す。
@@ -878,12 +902,14 @@ def usable_articles(articles: list) -> tuple:
        発行するため、保存時の重複検知（URL照合）をすり抜けて2件入る。
        2回解説しても聴く人の得にはならない。
 
-    どちらも生成の前に落とす。レポートの件数表示と実際の解説数を
+    3. 本文として題名しか保存されていない記事（is_title_only）。1 と同じく読むものが無い。
+
+    どれも生成の前に落とす。レポートの件数表示と実際の解説数を
     合わせるためにも、絞り込みは1か所で済ませる。
     """
     usable, seen = [], set()
     for a in articles:
-        if not (a.get("excerpt") or "").strip():
+        if not (a.get("excerpt") or "").strip() or is_title_only(a):
             continue
         key = _dedupe_key(a)
         if any(key) and key in seen:
