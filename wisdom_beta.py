@@ -335,7 +335,7 @@ def write_toc(db: dict) -> None:
              "そのうち動画のあるものは動画編に収録）",
              f"- 全文：[[{os.path.splitext(full)[0]}]]" if full else "- 全文：（なし）",
              "- 動画編：`動画編\\`（サイト掲載の動画23本を YouTube の自動字幕から解説。605〜627件目。"
-             "字幕は話した内容だけで、スライドの文字は入っていない）",
+             "スライドを使った講演3本は、画面に映ったスライドの内容も補足）",
              "- NotebookLM の指示文：`C:\\Obsidian_Vault\\プロンプト\\Wisdom-Beta音声解説用プロンプト.md`",
              "- 新着記事は毎朝自動で `新着\\` フォルダに追加される（`wisdom_beta.py daily`）", ""]
     cur = None
