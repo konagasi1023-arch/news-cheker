@@ -210,7 +210,8 @@ def write_toc(db: dict) -> None:
              "# Wisdom-Beta 教科書 目次", "",
              "マーケティングの知識サイト「Wisdom-Beta」（https://wisdom-evolution.com/）の記事を、",
              "章の順に1件ずつ解説した音声用の教材。NotebookLM にはパートごとに1ノートブックで入れる。", "",
-             f"- 全{len(items)}件（本文が{MIN_BODY}字未満の動画ページなど{skipped}本は除外）",
+             f"- 全{len(items)}件（本文が{MIN_BODY}字未満のページ{skipped}本は記事としては除外。"
+             "そのうち動画のあるものは動画編に収録）",
              f"- 全文：[[{os.path.splitext(full)[0]}]]" if full else "- 全文：（なし）",
              "- 動画編：`動画編\\`（サイト掲載の動画23本を YouTube の自動字幕から解説。605〜627件目。"
              "字幕は話した内容だけで、スライドの文字は入っていない）",
