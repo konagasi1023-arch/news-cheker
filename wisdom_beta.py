@@ -212,6 +212,8 @@ def write_toc(db: dict) -> None:
              "章の順に1件ずつ解説した音声用の教材。NotebookLM にはパートごとに1ノートブックで入れる。", "",
              f"- 全{len(items)}件（本文が{MIN_BODY}字未満の動画ページなど{skipped}本は除外）",
              f"- 全文：[[{os.path.splitext(full)[0]}]]" if full else "- 全文：（なし）",
+             "- 動画編：`動画編\\`（サイト掲載の動画23本を YouTube の自動字幕から解説。605〜627件目。"
+             "字幕は話した内容だけで、スライドの文字は入っていない）",
              "- NotebookLM の指示文：`C:\\Obsidian_Vault\\プロンプト\\Wisdom-Beta音声解説用プロンプト.md`",
              "- 新着記事は毎朝自動で `新着\\` フォルダに追加される（`wisdom_beta.py daily`）", ""]
     cur = None
