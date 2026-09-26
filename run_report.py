@@ -9,6 +9,7 @@ run_report.py - 保存記事から音声用レポートを作るまでを一本�
       → 直近レポート以降の記事を取得（日付ではなく作成時刻で切る）
       → 材料の無い記事と重複を落とす
       → カテゴリ別に生成（検算つき）
+      → 元記事の本文と照合（明らかな誤記は直し、疑いは vault の「…_照合.md」に書く）
       → Notion に保存
       → vault に音声用テキストを書き出す
       → 38分ごとに分割（1パート14件前後。上限は split_report.DEFAULT_MAX_MINUTES）
@@ -30,6 +31,7 @@ from datetime import datetime
 
 import main  # .env の読み込みのため
 import backfill  # write_classification を共用する
+import fact_check
 import gemini_client
 import notion_writer
 import split_report
@@ -318,6 +320,23 @@ def run(args) -> int:
     report_text = gemini_client.generate_report(usable, label)
 
     date_str = datetime.now(notion_writer.JST).strftime("%Y-%m-%d")
+
+    # 元記事との照合（失敗してもレポートは止めない）。n番目の記事＝n件目の対応は
+    # generate_report と同じ report_order で取る
+    checked = None
+    if not args.no_check:
+        try:
+            t0 = time.time()
+            checked = fact_check.check(report_text, usable, gemini_client.report_order(usable))
+            report_text, fixed, held = fact_check.apply_typos(report_text, checked)
+            print(f"照合 {sum(r['checked'] for r in checked)}/{len(checked)}件（{time.time() - t0:.0f}秒）"
+                  f"：誤記を直した {len(fixed)}件／直さず点検に回す {len(held)}件／"
+                  f"本文に根拠なしの語がある記事 {sum(bool(r['unsupported']) for r in checked)}件")
+            for f in fixed:
+                print(f"  {f['no']}件目 {f['wrong']} → {f['right']}")
+        except Exception as e:
+            print(f"[注意] 照合できなかった: {type(e).__name__}: {str(e)[:200]}")
+            checked = None
     title = f"📊 {kind}レポート {date_str}（{len(usable)}件）"
 
     # 原稿は生成に20分・Gemini 20回を使う。**Notion より先に vault へ書く。**
@@ -331,6 +350,11 @@ def run(args) -> int:
     print(f"\n{path}\n{len(report_text):,}字（読み上げ約{minutes}分）\n")
 
     split_report.run(path, args.minutes)
+
+    if checked is not None:
+        note = path.replace("_音声用.md", "_照合.md")  # レポートと対にする（2本目は _夜 も揃う）
+        fact_check.write_note(note, date_str, checked, fixed, held)
+        print(f"照合の結果: {note}")
 
     # 取りこぼしの一覧（失敗してもレポートは止めない）
     try:
@@ -352,6 +376,8 @@ def run(args) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="音声用レポートを通しで作る")
+    parser.add_argument("--no-check", action="store_true",
+                        help="元記事との照合を飛ばす")
     parser.add_argument("--dry-run", action="store_true",
                         help="生成せず、対象件数と内訳だけ出す")
     parser.add_argument("--days", type=int, default=LOOKBACK_DAYS,

@@ -937,6 +937,22 @@ def _drop_repeated_section(category: str, text: str) -> str:
     return text[:second].rstrip()
 
 
+def report_order(articles: list, grouped: bool = False):
+    """
+    レポートで記事を並べる順番。カテゴリごとにまとめ、件数の多いカテゴリから並べる。
+    grouped=True ならカテゴリ→記事の辞書（件数の多い順）、False なら記事を並べたリスト
+    （n番目＝レポートの n件目）。照合（fact_check）が元記事を確実に結びつけるのに使う
+    （題名で探すと、英語の記事は解説の冒頭で題名が訳されていて見つからない）。
+    """
+    by_category = {}
+    for a in articles:
+        by_category.setdefault(a.get("category") or "その他", []).append(a)
+    ordered = dict(sorted(by_category.items(), key=lambda kv: -len(kv[1])))
+    if grouped:
+        return ordered
+    return [a for items in ordered.values() for a in items]
+
+
 def generate_report(articles: list, label: str) -> str:
     """
     記事リストからふりかえりレポートを生成する。
@@ -967,9 +983,7 @@ def generate_report(articles: list, label: str) -> str:
         print(f"[report] 導入の生成に失敗: {e}")
 
     # カテゴリごとの本編（件数が多い順に扱う）
-    by_category = {}
-    for a in articles:
-        by_category.setdefault(a.get("category") or "その他", []).append(a)
+    by_category = report_order(articles, grouped=True)
 
     # 記事には全体を通した番号を振る。音声で聴くとき何件目かが分かり、
     # NotebookLM に読ませたときも1件ずつ辿ってもらいやすくなる。
