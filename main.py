@@ -22,7 +22,9 @@ import re
 import struct
 import zlib
 from urllib.parse import urlparse
-from fastapi import FastAPI, Request, HTTPException
+import threading
+import time
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse, Response, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -1027,8 +1029,47 @@ def share_message(result: dict, url: str) -> str:
     return f"✅ 保存しました（本文{result.get('body_chars', 0):,}字）：{t}"
 
 
+# 同じ URL を続けて共有したとき、裏の処理が並行して走ると2ページできる。処理中の URL を覚えておく
+_in_flight = set()
+_in_flight_lock = threading.Lock()
+
+
+def save_in_background(url: str, title: str, text: str) -> None:
+    """
+    共有を受け付けたあとに、取得・分類・保存を裏で行う（2026-09-26 ユーザー「とにかく速く」）。
+    以前は保存まで終わってから返事をしていたので、1件2〜15秒、続けて共有すると順番待ちで
+    120秒を超え、スマホ側がエラーになっていた。失敗は1回だけ取り直し、だめならログに残す。
+    本文が取れなかった記事は vault の「本文が取れなかった記事.md」に出る（15分おきに作り直す）。
+    """
+    key = url or (title or text)[:120]
+    with _in_flight_lock:
+        if key in _in_flight:
+            print(f"[SKIP] 処理中の共有と同じ: {key[:80]}")
+            return
+        _in_flight.add(key)
+    try:
+        for attempt in range(2):
+            try:
+                result = save_article(url, title, text)
+                print(f"[BG] {share_message(result, url)} - {url or '（リンクなし）'}")
+                return
+            except Exception as e:
+                print(f"[BG-NG] {attempt + 1}回目 {type(e).__name__}: {str(e)[:200]} - {url}")
+                if attempt == 0:
+                    time.sleep(20)
+    finally:
+        with _in_flight_lock:
+            _in_flight.discard(key)
+
+
+def accepted_message(url: str) -> str:
+    host = urlparse(url).netloc.replace("www.", "") if url else "リンクなし"
+    return f"📥 受け付けました（{host}）"
+
+
 @app.get("/save")
-async def save_from_share(url: str = "", title: str = "", text: str = ""):
+async def save_from_share(background_tasks: BackgroundTasks, url: str = "", title: str = "",
+                          text: str = "", wait: int = 0):
     """PWA シェアターゲット：Chrome の共有から URL を受信して Notion に保存"""
     # URL がどの欄に入ってくるかは共有元によって違うので、全部から探す
     if not url:
@@ -1063,6 +1104,15 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
             "<p>リンクも本文も渡されていません。"
             "投稿本文を選択してコピーしてから共有し直してください。</p>"
             "</body></html>"))
+
+    if not wait:
+        background_tasks.add_task(save_in_background, clean_url(url) if url else "", title, shared_text)
+        return HTMLResponse(content=f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"><title>News Cheker</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:40px 20px;background:#1a1a2e;color:#fff;">
+<h2>{html_module.escape(accepted_message(url))}</h2>
+<script>setTimeout(()=>window.close(),1000);</script>
+</body></html>""")
 
     try:
         result = save_article(clean_url(url) if url else "", title, shared_text)
@@ -1101,10 +1151,13 @@ p{{word-break:break-all;font-size:0.9em;opacity:0.8;}}
 
 
 @app.post("/webhook")
-async def webhook(request: Request, plain: int = 0):
+async def webhook(request: Request, background_tasks: BackgroundTasks,
+                  plain: int = 0, wait: int = 0):
     """
     ブックマークレット・HTTP Shortcuts から URL を受信して Notion に保存。
-    plain=1 のときは、通知にそのまま出せる一言（share_message）だけを文字で返す。
+    既定では受け付けた時点で返事をし、保存は裏で行う（save_in_background）。
+    wait=1 なら従来どおり保存まで待って結果を返す（動作確認用）。
+    plain=1 のときは、通知にそのまま出せる一言だけを文字で返す。
     """
     try:
         body = await request.json()
@@ -1150,6 +1203,13 @@ async def webhook(request: Request, plain: int = 0):
         raise HTTPException(
             status_code=400,
             detail=f"リンクも本文もありません。受け取った内容: {got}")
+
+    if not wait:
+        background_tasks.add_task(save_in_background, url, title, shared_text)
+        message = accepted_message(url)
+        if plain:
+            return PlainTextResponse(content=message)
+        return JSONResponse(content={"status": "accepted", "url": url, "message": message})
 
     try:
         result = save_article(url, title, shared_text)

@@ -187,7 +187,8 @@ def write_missing_list(vault: str) -> int:
     LinkedIn・Facebook はログインが必要で、リンクだけの共有では本文が取れない。
     投稿の本文をコピーして「本文つき」で共有し直すと、既存ページに本文が書き足され
     （main._fill_existing）、次の同期でこの一覧から消える。2026-09-26 にユーザーが選んだ対策。
-    vault のノートから作るので Notion は読まない（翌朝8:00の同期までの遅れはある）。
+    vault のノートから作るので Notion は読まない。15分おきの同期（sync_task.cmd）でも作り直す。
+    2026-09-26 から共有は保存を待たずに返事をするので、本文が取れなかったことはここで知る。
     """
     import theme
     from collections import defaultdict

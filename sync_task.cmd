@@ -1,6 +1,6 @@
 @echo off
 rem Incremental sync from Notion to the Obsidian vault.
-rem Called by Task Scheduler at logon and daily at 08:00.
+rem Called by Task Scheduler at logon and every 15 minutes (since 2026-09-26).
 rem
 rem ASCII only. cmd.exe reads this file in the OEM code page (cp932 here),
 rem so UTF-8 Japanese in a comment is decoded as garbage and breaks parsing
@@ -24,6 +24,10 @@ echo ==== %DATE% %TIME% ====>> "%LOG%"
 
 "%PY%" obsidian_sync.py --vault "C:\Obsidian_Vault" >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
+
+rem Rebuild the list of articles saved without body text. Since 2026-09-26 the
+rem webhook replies before saving, so this list is where the user sees them.
+"%PY%" -c "import run_report; print('missing list:', run_report.write_missing_list(r'C:\Obsidian_Vault'))" >> "%LOG%" 2>&1
 
 if %RC% neq 0 (
   echo [NG] sync failed, exit code %RC%>> "%LOG%"
