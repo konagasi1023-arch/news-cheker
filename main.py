@@ -23,7 +23,7 @@ import struct
 import zlib
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, Response, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -908,8 +908,19 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
     except Exception:
         existing = ""  # 照会に失敗しても保存は続行する
     if existing:
+        # 本文が取れずに保存された投稿（LinkedIn・Facebook のリンクだけの共有など）に、
+        # 「本文つき」で共有し直した本文が届いたら、既存のページに書き足す。
+        # 以前は同じ URL なので「保存済み」で弾かれ、入れ直す手段が無かった（2026-09-26）
+        try:
+            filled = _fill_existing(existing, url, title_hint, context_hint, token)
+        except Exception as e:
+            print(f"[WARN] 既存ページへの書き足しに失敗: {type(e).__name__}: {e}")
+            filled = None
+        if filled:
+            return filled
         return {"duplicate": True, "notion_url": existing, "title": title_hint,
-                "category": "", "tags": [], "summary": []}
+                "category": "", "tags": [], "summary": [], "needs_text": False,
+                "body_chars": 0}
 
     # タイトルと本文を取得（X は oEmbed、SmartNews は元記事を解決して本文まで取る）
     # リンクが無い投稿は取りに行く先が無いので、共有された本文だけで組み立てる
@@ -961,8 +972,59 @@ def save_article(url: str, title_hint: str = "", context_hint: str = "") -> dict
         category=category, tags=tags, summary=summary,
         excerpt=context, note=note, original_url=meta["original_url"],
     )
+    # 本文が取れたかどうか。取れていなければ、共有した人にその場で知らせる
+    needs_text = bool(url) and not note and (
+        not context.strip() or gemini_client.is_title_only({"title": title, "excerpt": context}))
     return {"duplicate": False, "notion_url": notion_url, "title": title,
-            "category": category, "tags": tags, "summary": summary}
+            "category": category, "tags": tags, "summary": summary,
+            "needs_text": needs_text, "body_chars": 0 if needs_text else len(context)}
+
+
+# 題名として意味をなさないもの（取得に失敗したときに入る）
+_BAD_TITLE = re.compile(r"^(www\.)?[\w.-]+\.(com|jp|in|net|org|io)$|^Facebook$|^LinkedIn$", re.I)
+
+
+def _fill_existing(notion_url: str, url: str, title_hint: str, text: str, token: str):
+    """
+    既存ページに本文が無く、今回の共有に本文があれば、書き足して結果を返す。
+    書き足す必要が無ければ None（＝ふつうの「保存済み」）。
+    """
+    text = (text or "").strip()
+    if len(text) < 100 or gemini_client.is_title_only({"title": title_hint, "excerpt": text}):
+        return None                      # 今回も本文が無い
+    page_id = notion_writer.page_id_of(notion_url)
+    cur = notion_writer.read_page(token, page_id)
+    if cur["excerpt"].strip() and not gemini_client.is_title_only(cur):
+        return None                      # 既に本文がある。ふつうの重複
+    old_title = cur["title"]
+    res = gemini_client.classify(title_hint or ("" if _BAD_TITLE.match(old_title) else old_title),
+                                 url, text)
+    title = title_hint or (old_title if old_title and not _BAD_TITLE.match(old_title) else "")
+    if not title and res.get("ok") and res.get("article_title"):
+        title = res["article_title"]
+    title = title or _title_from_text(text) or old_title
+    notion_writer.fill_page_body(
+        token, page_id, title,
+        res["category"] if res.get("ok") else "", res["tags"] if res.get("ok") else [],
+        res["summary"] if res.get("ok") else [], text, cur["blocks"])
+    print(f"[FILL] 本文を書き足した: {title[:40]} - {url}")
+    return {"duplicate": False, "filled": True, "notion_url": notion_url, "title": title,
+            "category": res.get("category", ""), "tags": res.get("tags", []),
+            "summary": res.get("summary", []), "needs_text": False, "body_chars": len(text)}
+
+
+def share_message(result: dict, url: str) -> str:
+    """共有した人に返す一言（HTTP Shortcuts の通知・PWA の画面に出す）"""
+    host = urlparse(url).netloc.replace("www.", "") if url else "リンクなし"
+    t = (result.get("title") or "")[:40]
+    if result.get("filled"):
+        return f"✅ 本文を追加しました（{result['body_chars']:,}字）：{t}"
+    if result.get("duplicate"):
+        return f"📌 既に保存済みです：{t or url}"
+    if result.get("needs_text"):
+        return (f"⚠️ 保存しましたが本文が取れませんでした（{host}）。"
+                f"投稿の本文をコピーして「News Cheker（本文つき）」で共有し直してください。")
+    return f"✅ 保存しました（本文{result.get('body_chars', 0):,}字）：{t}"
 
 
 @app.get("/save")
@@ -1021,6 +1083,9 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
 </body></html>""")
 
     meta = f"{category}｜{' · '.join(tags)}" if category else ""
+    message = html_module.escape(share_message(result, url))
+    # 本文が取れなかったときは画面を自動で閉じない（読んで共有し直してもらうため）
+    close = "" if result.get("needs_text") else "<script>setTimeout(()=>window.close(),3000);</script>"
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8"><title>News Cheker</title>
 <meta name="theme-color" content="#4285f4">
@@ -1028,16 +1093,19 @@ async def save_from_share(url: str = "", title: str = "", text: str = ""):
 p{{word-break:break-all;font-size:0.9em;opacity:0.8;}}
 .meta{{color:#4285f4;font-size:0.85em;margin-top:12px;}}</style>
 </head><body>
-<h2>✅ 保存しました</h2>
+<h2>{message}</h2>
 <p>{title}</p>
 <p class="meta">{meta}</p>
-<script>setTimeout(()=>window.close(),3000);</script>
+{close}
 </body></html>""")
 
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    """ブックマークレットから URL を受信して Notion に保存"""
+async def webhook(request: Request, plain: int = 0):
+    """
+    ブックマークレット・HTTP Shortcuts から URL を受信して Notion に保存。
+    plain=1 のときは、通知にそのまま出せる一言（share_message）だけを文字で返す。
+    """
     try:
         body = await request.json()
     except Exception:
@@ -1088,19 +1156,27 @@ async def webhook(request: Request):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=f"Notion API エラー: {e}")
 
+    message = share_message(result, url)
+    if plain:
+        return PlainTextResponse(content=message)
+
     if result["duplicate"]:
         print(f"[SKIP] 重複のため保存せず: {url}")
         return JSONResponse(content={
-            "status": "duplicate", "notion_url": result["notion_url"], "url": url})
+            "status": "duplicate", "notion_url": result["notion_url"], "url": url,
+            "message": message})
 
-    print(f"[OK] 保存完了: [{result['category']}] {result['title']} - {url}")
+    print(f"[OK] 保存完了: [{result['category']}] {result['title']} - {url}"
+          + (" （本文なし）" if result.get("needs_text") else ""))
     return JSONResponse(content={
-        "status": "ok",
+        "status": "filled" if result.get("filled") else "ok",
         "title": result["title"],
         "category": result["category"],
         "tags": result["tags"],
         "summary": result["summary"],
         "notion_url": result["notion_url"],
+        "needs_text": result.get("needs_text", False),
+        "message": message,
     })
 
 

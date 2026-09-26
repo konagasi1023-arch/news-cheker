@@ -7,16 +7,14 @@
       "description": "URLをNotionに保存（共有された件名も一緒に送る）",
       "iconName": "flat_bookmark",
       "method": "POST",
-      "url": "https://news-cheker.onrender.com/webhook",
+      "url": "https://news-cheker.onrender.com/webhook?plain=1",
       "contentType": "application/json",
       "bodyContent": "{\"url\": \"{url}\", \"title\": \"{sharetitle}\"}",
       "timeout": 120000,
       "feedbackType": "toast",
-      "successMessage": "Notionに保存しました",
       "responseHandling": {
-        "successOutput": "message",
-        "failureOutput": "detailed",
-        "successMessage": "Notionに保存しました"
+        "successOutput": "response",
+        "failureOutput": "detailed"
       }
     },
     {
@@ -25,16 +23,14 @@
       "description": "投稿本文をコピーしてから使う。クリップボードの中身を本文として一緒に送る。Facebookのようにリンクしか共有されないSNS向け。",
       "iconName": "flat_clipboard",
       "method": "POST",
-      "url": "https://news-cheker.onrender.com/webhook",
+      "url": "https://news-cheker.onrender.com/webhook?plain=1",
       "contentType": "application/json",
       "bodyContent": "{\"url\": \"{url}\", \"text\": \"{clipboard}\"}",
       "timeout": 120000,
       "feedbackType": "toast",
-      "successMessage": "本文つきで保存しました",
       "responseHandling": {
-        "successOutput": "message",
-        "failureOutput": "detailed",
-        "successMessage": "本文つきで保存しました"
+        "successOutput": "response",
+        "failureOutput": "detailed"
       }
     }
   ],
@@ -42,7 +38,10 @@
     {
       "id": "default",
       "name": "Shortcuts",
-      "shortcutIds": ["news_cheker_url", "news_cheker_with_body"]
+      "shortcutIds": [
+        "news_cheker_url",
+        "news_cheker_with_body"
+      ]
     }
   ],
   "variables": [

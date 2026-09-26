@@ -174,6 +174,62 @@ def unique_path(path: str) -> str:
     raise RuntimeError(f"書き出し先が決められません: {path}")
 
 
+MISSING_NOTE = "News Checker/本文が取れなかった記事.md"
+MISSING_DAYS = 14
+
+
+def write_missing_list(vault: str) -> int:
+    """
+    直近 MISSING_DAYS 日で、本文が取れなかった記事（0字・題名だけ）の一覧を作り直す。
+
+    LinkedIn・Facebook はログインが必要で、リンクだけの共有では本文が取れない。
+    投稿の本文をコピーして「本文つき」で共有し直すと、既存ページに本文が書き足され
+    （main._fill_existing）、次の同期でこの一覧から消える。2026-09-26 にユーザーが選んだ対策。
+    vault のノートから作るので Notion は読まない（翌朝8:00の同期までの遅れはある）。
+    """
+    import theme
+    from collections import defaultdict
+    from datetime import timedelta
+    from urllib.parse import urlparse
+
+    since = (datetime.now(notion_writer.JST) - timedelta(days=MISSING_DAYS)).strftime("%Y-%m-%d")
+    notes, _ = theme.load_notes(vault)
+    groups = defaultdict(list)
+    for n in notes:
+        url = n.get("url") or ""
+        if not url.startswith("http") or (n.get("saved") or "") < since:
+            continue
+        ex = (n.get("excerpt") or "").strip()
+        if ex and not gemini_client.is_title_only(n):
+            continue
+        host = urlparse(url).netloc.replace("www.", "")
+        label = ("LinkedIn" if ("lnkd.in" in host or "linkedin" in host) else
+                 "Facebook" if "facebook" in host else
+                 "X（Twitter）" if host in ("x.com", "twitter.com") else "その他のサイト")
+        groups[label].append(n)
+    total = sum(len(v) for v in groups.values())
+    lines = ["---", 'title: "本文が取れなかった記事"', f"updated: {datetime.now():%Y-%m-%d %H:%M}",
+             f"count: {total}", "---", "", "# 本文が取れなかった記事", "",
+             f"直近{MISSING_DAYS}日に保存した記事のうち、本文が0字か題名だけのもの。レポートには入っていない。",
+             "入れ直すには、リンクを開いて**投稿の本文をコピー**し、Android の共有から",
+             "**「News Cheker（本文つき）」**で共有する。既存のページに本文が書き足され、次のレポートに載る。",
+             "（入れ直した記事は、翌朝の同期のあとこの一覧から消える）", ""]
+    for label in ("LinkedIn", "Facebook", "X（Twitter）", "その他のサイト"):
+        items = sorted(groups.get(label, []), key=lambda n: n.get("saved", ""), reverse=True)
+        if not items:
+            continue
+        lines += [f"## {label}（{len(items)}件）", ""]
+        for n in items:
+            note = os.path.splitext(os.path.basename(n["path"]))[0]
+            lines.append(f"- {n.get('saved', '')} [{n['title'][:60]}]({n['url']}) — [[{note}|ノート]]")
+        lines.append("")
+    path = os.path.join(vault, MISSING_NOTE)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"\n本文が取れなかった記事（直近{MISSING_DAYS}日）: {total}件 → {path}")
+    return total
+
+
 def run(args) -> int:
     token, database_id = notion_writer.get_credentials()
 
@@ -275,6 +331,12 @@ def run(args) -> int:
     print(f"\n{path}\n{len(report_text):,}字（読み上げ約{minutes}分）\n")
 
     split_report.run(path, args.minutes)
+
+    # 取りこぼしの一覧（失敗してもレポートは止めない）
+    try:
+        write_missing_list(args.vault)
+    except Exception as e:
+        print(f"[注意] 取りこぼしの一覧を作れなかった: {type(e).__name__}: {e}")
 
     # Notion のページは次回の切り取り位置にもなる。保存に失敗したら、次回は
     # 同じ記事がもう一度対象に入る（取りこぼすより安全）。原稿は vault に残っている。

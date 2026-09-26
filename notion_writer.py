@@ -247,6 +247,40 @@ def save_to_notion(
     return f"https://www.notion.so/{page_id}"
 
 
+def page_id_of(notion_url: str) -> str:
+    """https://www.notion.so/<32桁> からページIDを取り出す"""
+    m = re.search(r"([0-9a-f]{32})", (notion_url or "").replace("-", ""))
+    return m.group(1) if m else ""
+
+
+def read_page(token: str, page_id: str) -> dict:
+    """ページの題名と、本文抜粋（段落をつないだもの）を読む"""
+    pg = notion_request("GET", f"/pages/{page_id}", token)
+    title = "".join(a.get("plain_text", "")
+                    for a in pg.get("properties", {}).get("名前", {}).get("title", []))
+    blocks = notion_request("GET", f"/blocks/{page_id}/children?page_size=100", token)
+    paras = ["".join(r.get("plain_text", "") for r in b["paragraph"].get("rich_text", []))
+             for b in blocks.get("results", []) if b.get("type") == "paragraph"]
+    return {"title": title, "excerpt": "\n".join(p for p in paras if p.strip()),
+            "blocks": [b["id"] for b in blocks.get("results", [])
+                       if b.get("type") in ("paragraph", "callout")]}
+
+
+def fill_page_body(token: str, page_id: str, title: str, category: str, tags: list,
+                   summary: list, excerpt: str, old_blocks: list) -> None:
+    """
+    本文が取れなかったページに、あとから届いた本文を書き足す（ページは作り直さない）。
+    日付を今日に進めるので、次のレポートに載る（fetch_recent_articles の切り取り参照）。
+    """
+    props = build_properties("", title, category, tags)
+    props["日付"] = {"date": {"start": datetime.now(JST).strftime("%Y-%m-%dT%H:%M:%S+09:00")}}
+    notion_request("PATCH", f"/pages/{page_id}", token, {"properties": props})
+    notion_request("PATCH", f"/blocks/{page_id}/children", token,
+                   {"children": build_excerpt_blocks(summary, excerpt)})
+    for bid in old_blocks:
+        notion_request("DELETE", f"/blocks/{bid}", token)
+
+
 REPORT_CATEGORY = "レポート"
 
 
@@ -313,6 +347,8 @@ def fetch_recent_articles(token: str, database_id: str, days: int,
                     item["category"] = (val.get("select") or {}).get("name", "")
                 elif kind == "multi_select":
                     item["tags"] = [o["name"] for o in val.get("multi_select", [])]
+                elif kind == "date":
+                    item["saved_at"] = (val.get("date") or {}).get("start") or ""
             if item["category"] != REPORT_CATEGORY:
                 articles.append(item)
 
@@ -322,8 +358,13 @@ def fetch_recent_articles(token: str, database_id: str, days: int,
 
     cutoff = parse_time(created_after)
     if cutoff:
-        articles = [a for a in articles
-                    if (parse_time(a["created_time"]) or cutoff + timedelta(seconds=1)) > cutoff]
+        # 切り取りは「作成時刻」と「日付」の遅いほうで見る。本文が取れなかった投稿に
+        # あとから本文を書き足したとき（fill_page_body）、日付をその日に進めるので、
+        # 作成が前回レポートより前でも次のレポートに載る（2026-09-26）
+        def when(a):
+            times = [t for t in (parse_time(a["created_time"]), parse_time(a.get("saved_at"))) if t]
+            return max(times) if times else cutoff + timedelta(seconds=1)
+        articles = [a for a in articles if when(a) > cutoff]
 
     # ページ本文から3行要約（コールアウト）と本文抜粋（段落）を読み取る
     for item in articles:
