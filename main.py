@@ -710,6 +710,11 @@ def fetch_meta(url: str) -> dict:
     body = extract_article_body(html)
     if from_smartnews_preview:
         body = _strip_smartnews_chrome(body)
+    # Facebook の投稿ページは、投稿の文章が og:description に入り、ページ本体で
+    # 一番文章が多いのはコメント欄になる。本体を取ると他人のコメントが本文になる
+    # （2026-09-26「Send this Jev prompt…」の投稿がコメント277字で保存された）
+    if urlparse(final_url or target).netloc.endswith("facebook.com") and description:
+        body = description
     if not body and len(description) >= 60:
         # 本文が取れないページでも、og:description には記事の書き出しが入る。
         # 全文には及ばないが、要約やレポートの材料としては使える。
