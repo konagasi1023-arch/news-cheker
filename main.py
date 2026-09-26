@@ -633,6 +633,9 @@ def _strip_smartnews_chrome(text: str) -> str:
     return "\n".join(lines)
 
 
+_BLOCK_NOTICES = ("コンテンツブロックが有効であることを検知",)
+
+
 def fetch_meta(url: str) -> dict:
     """
     URL からタイトル・本文抜粋・本文を取得する。
@@ -710,6 +713,15 @@ def fetch_meta(url: str) -> dict:
     body = extract_article_body(html)
     if from_smartnews_preview:
         body = _strip_smartnews_chrome(body)
+    # 東洋経済は機械からの取得に本文の代わりに「コンテンツブロックを無効に」という通知を返す
+    # （2026-09-20・09-27 の2回、レポートに「確認できませんでした」の項目が出た）。
+    # 通知は本文ではない。SmartNews 経由なら、SmartNews のページにある書き出しで代える
+    if any(n in body for n in _BLOCK_NOTICES):
+        body = ""
+        if original_url and not from_smartnews_preview:
+            preview = _download_html(url)
+            if preview:
+                body = _strip_smartnews_chrome(extract_article_body(preview))
     # Facebook の投稿ページは、投稿の文章が og:description に入り、ページ本体で
     # 一番文章が多いのはコメント欄になる。本体を取ると他人のコメントが本文になる
     # （2026-09-26「Send this Jev prompt…」の投稿がコメント277字で保存された）
