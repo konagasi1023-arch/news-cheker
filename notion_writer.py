@@ -52,9 +52,36 @@ def notion_request(method: str, endpoint: str, token: str, data: dict = None) ->
                     wait = 0
                 time.sleep(wait or 2 * attempt)
                 continue
+            # タグの選択肢が増えすぎると、データベースの定義が上限（約500KB）を超え、
+            # 新しいタグを含む書き込みが 400 で拒否される（2026-09-28 に発生。
+            # 共有は裏で保存するので、スマホには何も出ずに記事が失われる）。
+            # 既にあるタグだけに絞って1回だけ書き直す。記事を失うよりタグを落とすほうがよい
+            if (e.code == 400 and "schema has exceeded" in error_body
+                    and data and TAG_PROPERTY in (data.get("properties") or {})):
+                known = _known_tags(token)
+                tags = data["properties"][TAG_PROPERTY]["multi_select"]
+                kept = [t for t in tags if t.get("name") in known]
+                print(f"[notion] タグの定義が上限。新しいタグを外して保存: "
+                      f"{[t.get('name') for t in tags if t not in kept]}")
+                retry = {**data, "properties": {**data["properties"],
+                                                TAG_PROPERTY: {"multi_select": kept}}}
+                return notion_request(method, endpoint, token, retry)
             raise RuntimeError(f"Notion HTTP {e.code}: {error_body}")
         except Exception as e:
             raise RuntimeError(f"Notion request failed: {e}")
+
+
+_tag_cache = {"at": 0.0, "names": set()}
+
+
+def _known_tags(token: str) -> set:
+    """データベースに既にあるタグの選択肢（10分キャッシュ）"""
+    if time.time() - _tag_cache["at"] > 600:
+        db = os.environ.get("NOTION_DATABASE_ID", "").strip()
+        res = notion_request("GET", f"/databases/{db}", token)
+        opts = res["properties"][TAG_PROPERTY]["multi_select"]["options"]
+        _tag_cache.update(at=time.time(), names={o["name"] for o in opts})
+    return _tag_cache["names"]
 
 
 def extract_page_id(value: str) -> str:
