@@ -462,8 +462,7 @@ URL: {url}
 - 脳科学・心理・哲学 … 脳科学・認知科学・心理学・進化論・哲学・思考法
 - その他 … 上記のいずれにも当てはまらないもの
 
-【タグ】記事を特徴づけるキーワードを{max_tags}個以内。
-製品名・技術名・具体的なテーマを短い語で（例: Claude Code, MCP, プロンプト, SEO）。
+{tag_rule}
 
 【3行要約】記事の要点を最大3行、各行60字以内で。
 与えられた情報から確実に言えることだけを書き、推測で補わない。
@@ -488,6 +487,37 @@ false のときは summary を空の配列にすること。推測で埋めて�
 必要なときは全角の ” か「」を使う。そのまま書くと JSON が壊れる。
 
 JSON形式のみで出力: {{"category": "...", "tags": ["...", "..."], "summary": ["1行目", "2行目", "3行目"], "title": "...", "title_composed": false, "has_content": true}}"""
+
+
+# タグは「よく使うタグ」の一覧（tag_vocab.json）から選ばせる（2026-09-28 ユーザー選択）。
+# 自由に作らせていたら1回きりのタグが 3,879 個たまり、Notion のデータベース定義が
+# 上限に達して新しいタグを書き込めなくなった（API では選択肢を減らせない）。
+# 一覧が無いときだけ従来どおり自由に作らせる。一覧は tag_vocab.py で作り直す。
+def _load_tag_vocab() -> list:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tag_vocab.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [t for t in json.load(f) if isinstance(t, str) and t.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+TAG_VOCAB = _load_tag_vocab()
+# 表記の揺れ（大文字小文字・空白）を吸収して一覧の表記に戻す
+_TAG_CANON = {re.sub(r"\s+", "", t).lower(): t for t in TAG_VOCAB}
+
+TAG_RULE_FREE = """【タグ】記事を特徴づけるキーワードを{max_tags}個以内。
+製品名・技術名・具体的なテーマを短い語で（例: Claude Code, MCP, プロンプト, SEO）。"""
+
+TAG_RULE_VOCAB = """【タグ】次の一覧から、記事を特徴づけるものを{max_tags}個以内選ぶ。
+**一覧に無い語は書かないこと**（言い換えや新しい語も不可）。当てはまるものが無ければ空の配列にする。
+一覧: {vocab}"""
+
+
+def _tag_rule() -> str:
+    if not TAG_VOCAB:
+        return TAG_RULE_FREE.format(max_tags=MAX_TAGS)
+    return TAG_RULE_VOCAB.format(max_tags=MAX_TAGS, vocab=", ".join(TAG_VOCAB))
 
 
 # JSON が壊れて返ってきたときに、頼み直すために足す注意書き。
@@ -534,7 +564,7 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
     prompt = CLASSIFY_PROMPT.format(
         title=_safe_for_json(title[:300]), url=url[:300],
         context=_safe_for_json(context[:4000]) or "（なし）",
-        max_tags=MAX_TAGS,
+        tag_rule=_tag_rule(),
     )
     def build_body(text: str) -> bytes:
         return json.dumps({
@@ -620,7 +650,10 @@ def classify(title: str, url: str = "", context: str = "") -> dict:
     for tag in data.get("tags") or []:
         if isinstance(tag, str):
             cleaned = tag.replace(",", " ").strip()[:60]
-            if cleaned:
+            if TAG_VOCAB:
+                # 一覧に無い語は落とす（モデルは指示しても時々新しい語を作る）
+                cleaned = _TAG_CANON.get(re.sub(r"\s+", "", cleaned).lower(), "")
+            if cleaned and cleaned not in tags:
                 tags.append(cleaned)
 
     summary = [
