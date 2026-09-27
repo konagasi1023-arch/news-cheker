@@ -22,6 +22,10 @@ cd /d "%PROJECT%" || exit /b 1
 echo.>> "%LOG%"
 echo ==== %DATE% %TIME% ====>> "%LOG%"
 
+rem Re-fetch articles saved without body text from this PC. Some sites
+rem (thebridge.jp) refuse the Render server but answer this PC (2026-09-28).
+"%PY%" refetch_empty.py --vault "C:\Obsidian_Vault" >> "%LOG%" 2>&1
+
 "%PY%" obsidian_sync.py --vault "C:\Obsidian_Vault" >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
 
