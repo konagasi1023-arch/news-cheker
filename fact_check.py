@@ -196,6 +196,9 @@ def _auto_ok(wrong: str, right: str, excerpt: str) -> str:
     - 数字を丸めた言い回しを書き換える（四分の割→ほぼ四分の一、四十→四十一）
     数字の食い違いは本物（一万→100万トークン）でも読み方を決めきれないので、点検に回す。
     """
+    # 「該当なし」「記載なし」は訂正ではない（2026-10-01、人名「Md Ismail Sojal」が「該当なし」に置き換わった）
+    if re.search(r"該当なし|記載なし|記載が無|^なし$|不明|本文に", right):
+        return "訂正案が無い"
     if _ASCII.search(right) and not _ASCII.search(wrong):
         return "訂正案が英数字"
     if _NUM.search(wrong):
@@ -205,8 +208,8 @@ def _auto_ok(wrong: str, right: str, excerpt: str) -> str:
         if re.search(r"[0-9]", wrong) and not re.search(r"[0-9]", right) and _NUM.search(right):
             return ""
         return "数字"
-    if _LATIN.search(wrong):
-        return ""  # 生成の崩れ（イvery）
+    if _LATIN.search(wrong) and re.search(r"[ぁ-んァ-ヶ一-龥]", wrong):
+        return ""  # 日本語に英字が混ざった生成の崩れ（イvery）。英字だけの語（人名など）は直さない
     if _fold(right) in _fold(excerpt):
         return ""
     if _KATA.match(wrong) and _KATA.match(right) and len(right) <= 16:
