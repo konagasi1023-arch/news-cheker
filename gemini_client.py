@@ -960,14 +960,27 @@ def _drop_repeated_section(category: str, text: str) -> str:
     2件の解説までを2回続けて書いた。番号は振り直しで57まで伸び、検算が 55/57 になった。
     記事は欠けていないが、同じ話を2回聴くことになる。
     見出しが2回出たら、2回目の見出しから後ろを捨てる（1回の呼び出しに区切りは1つしか無い）。
+
+    ただし捨てるのは、2回目の側の記事番号が1回目の側と同じとき（本当の繰り返し）だけ。
+    2026-09-30、マーケティング・広告の52〜59件目で、見出しが2回出た2回目の側にだけ
+    8件の解説が入っていて、それを捨てたため記事が8件消えた（番号の振り直しで欠けが隠れた）。
     """
     header = f"ここからは{category}の話題です"
     first = text.find(header)
     second = text.find(header, first + 1) if first >= 0 else -1
     if second < 0:
         return text
-    print(f"[report] {category}: 同じ区切りが2回書かれていたので2回目を落とします")
-    return text[:second].rstrip()
+    nums = lambda t: set(re.findall(r"^(\d+)(?:件目|番目)", t, re.M))
+    before, after = nums(text[:second]), nums(text[second:])
+    if after and after <= before:
+        print(f"[report] {category}: 同じ区切りが2回書かれていたので2回目を落とします")
+        return text[:second].rstrip()
+    if not before:
+        print(f"[report] {category}: 見出しが2回。1回目の側に解説が無いので、1回目の見出しを落とします")
+        return text[second:]
+    print(f"[report] {category}: 見出しが2回。記事番号が違うので両方残し、2回目の見出しだけ消します")
+    line_end = text.find("\n", second)
+    return text[:second].rstrip() + "\n\n" + (text[line_end + 1:] if line_end >= 0 else "")
 
 
 def report_order(articles: list, grouped: bool = False):

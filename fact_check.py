@@ -156,6 +156,14 @@ def check(text: str, articles: list, ordered: list = None) -> list:
     batches = [pairs[i:i + BATCH] for i in range(0, len(pairs), BATCH)]
     with ThreadPoolExecutor(max_workers=3) as ex:
         answers = [r for rs in ex.map(run, batches) for r in rs]
+    # 組ごと照合できなかった（JSON の崩れなど）記事は、1件ずつに分けてもう一度だけ照合する
+    # （2026-09-28・30 に、最後の組がまるごと落ちた）
+    got = {int(r.get("no")) for r in answers if str(r.get("no", "")).isdigit()}
+    retry = [[x] for x in pairs if x["no"] not in got]
+    if retry:
+        print(f"  [照合] 照合できなかった {len(retry)}件を1件ずつ照合し直す")
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            answers += [r for rs in ex.map(run, retry) for r in rs]
     by_no = {}
     for r in answers:
         try:
@@ -191,8 +199,10 @@ def _auto_ok(wrong: str, right: str, excerpt: str) -> str:
     if _ASCII.search(right) and not _ASCII.search(wrong):
         return "訂正案が英数字"
     if _NUM.search(wrong):
-        # 読み下しに算用数字が混ざったもの（二〇19年→二〇一九年）だけは表記の統一として直す
-        if re.search(r"[0-9]", wrong) and not re.search(r"[0-9]", right):
+        # 読み下しに算用数字が混ざったもの（二〇19年→二〇一九年）だけは表記の統一として直す。
+        # 訂正案にも数字があることを条件にする（2026-09-30、「50歳以上」→「特化型」という
+        # 言い換えがこの条件をすり抜けて自動で入った）
+        if re.search(r"[0-9]", wrong) and not re.search(r"[0-9]", right) and _NUM.search(right):
             return ""
         return "数字"
     if _LATIN.search(wrong):
