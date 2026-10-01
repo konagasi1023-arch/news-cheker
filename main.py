@@ -647,6 +647,12 @@ _EMBED_PDF_RES = [
     re.compile(r'<iframe[^>]+src=["\'][^"\']*[?&](?:file|url)=([^"\'&]+\.pdf)', re.I),
     re.compile(r'<iframe[^>]+src=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I),
     re.compile(r'<a[^>]+class=["\'][^"\']*wp-block-file__button[^"\']*["\'][^>]*href=["\']([^"\']+\.pdf)', re.I),
+    # JavaScript の PDF ビューアに data 属性で渡しているもの（The Trade Desk の
+    # `<section class="pdf-embed" data-pdf-url="….pdf">`、2026-10-01）
+    re.compile(r'data-[\w-]*(?:pdf|file|src|url|document)[\w-]*=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I),
+    # 「Download」「ダウンロード」と書かれたボタンのリンク（ホワイトペーパーの送信後のお礼ページ）
+    re.compile(r'<a[^>]+href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\'][^>]*>\s*(?:<[^>]+>\s*)*[^<]{0,20}?'
+               r'(?:Download|ダウンロード|資料を見る|Read the (?:full )?report|View (?:the )?(?:report|PDF))', re.I),
 ]
 # ページ自身の本文がこれより短いときだけ、埋め込み PDF を本文にする
 # （記事に参考資料の PDF が付いているだけのページでは、記事の本文を優先する）
