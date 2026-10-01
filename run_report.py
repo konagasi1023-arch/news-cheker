@@ -24,6 +24,7 @@ run_report.py - 保存記事から音声用レポートを作るまでを一本�
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -176,6 +177,30 @@ def unique_path(path: str) -> str:
     raise RuntimeError(f"書き出し先が決められません: {path}")
 
 
+# 追補した記事の控え（ページID → 載せたレポートの日付）。手で追補したときに書き足す
+REPORT_ADDITIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_additions.json")
+
+
+def load_report_additions() -> set:
+    try:
+        with open(REPORT_ADDITIONS, encoding="utf-8") as f:
+            return {k.replace("-", "") for k in json.load(f)}
+    except (OSError, ValueError):
+        return set()
+
+
+def record_report_addition(page_id: str, report_date: str) -> None:
+    """追補した記事を控えておく（次のレポートから外すため）"""
+    try:
+        with open(REPORT_ADDITIONS, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    data[page_id.replace("-", "")] = report_date
+    with open(REPORT_ADDITIONS, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+
+
 MISSING_NOTE = "News Checker/本文が取れなかった記事.md"
 MISSING_DAYS = 14
 
@@ -263,6 +288,15 @@ def run(args) -> int:
     if undated:
         # 落とさず残してある。黙って消すと1本失うため、代わりに知らせる
         print(f"[注意] 作成時刻を読めない記事が {len(undated)}件。対象に入れています")
+    # 前のレポートに追補した記事は外す。追補はレポートを作った後に保存された記事を
+    # 末尾に足すことがあり（2026-10-01、The Trade Desk の PDF）、作成時刻が切り取りより
+    # 後なので、何もしないと次のレポートにもう一度載る
+    added = load_report_additions()
+    again = [a for a in articles if (a.get("id") or "").replace("-", "") in added]
+    if again:
+        articles = [a for a in articles if a not in again]
+        print(f"前のレポートに追補済みのため外した: {len(again)}件 "
+              + " / ".join((a.get("title") or "")[:30] for a in again))
     print(f"切り取り後 {len(articles)}件")
     if not articles:
         print("対象の記事がありません。")
