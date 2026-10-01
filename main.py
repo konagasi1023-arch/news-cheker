@@ -887,8 +887,25 @@ async def icon():
     return Response(content=svg, media_type="image/svg+xml")
 
 
+# PC のブラウザから保存するブックマークレット（2026-10-01 ユーザー選択「B」）。
+# PC では Obsidian に直接クリップしてしまい、ページに埋め込まれた PDF の中身や
+# 日次レポートへの取り込みが抜けていた。押すと /save（PWA と同じ受け口）を小窓で開く。
+# - fetch で送らないのは、Facebook などの厳しい CSP（connect-src）で止められるため。
+#   小窓を開く（ページ遷移）は CSP に止められない
+# - 選択中の文章があれば text として送る（ログイン中の PC なら Facebook の投稿本文も渡せる）。
+#   GET なので URL が長くなりすぎないよう、エンコード後7,000字に収まるまで削る
+BOOKMARKLET = (
+    "javascript:(function(){var s=String(getSelection()).trim();"
+    "while(encodeURIComponent(s).length>7000){s=s.slice(0,Math.floor(s.length*0.8));}"
+    "var u='https://news-cheker.onrender.com/save?url='+encodeURIComponent(location.href)"
+    "+'&title='+encodeURIComponent(document.title)+(s?'&text='+encodeURIComponent(s):'');"
+    "window.open(u,'newscheker','width=460,height=280');})();"
+)
+
+
 @app.get("/")
 async def index():
+    bookmarklet = html_module.escape(BOOKMARKLET, quote=True)
     html = """<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -901,18 +918,33 @@ async def index():
     body { font-family: sans-serif; text-align: center; padding: 60px 20px; background: #1a1a2e; color: #fff; }
     h1 { font-size: 2rem; margin-bottom: 8px; }
     p { color: #aaa; }
+    .pc { max-width: 560px; margin: 40px auto 0; padding: 20px; border: 1px solid #444; border-radius: 10px; text-align: left; }
+    .pc h2 { font-size: 1.1rem; margin-top: 0; }
+    .pc li { color: #ccc; margin: 6px 0; line-height: 1.6; }
+    .bm { display: inline-block; margin: 8px 0 14px; padding: 10px 18px; background: #4285f4; color: #fff;
+          border-radius: 8px; text-decoration: none; font-weight: bold; }
   </style>
 </head>
 <body>
   <h1>📰 News Cheker</h1>
   <p>Chromeで記事を共有すると Notion に保存されます。</p>
+  <div class="pc">
+    <h2>PC のブラウザから保存する</h2>
+    <a class="bm" href="__BOOKMARKLET__">📰 News Checkerに送る</a>
+    <ol>
+      <li>上の青いボタンを、ブラウザの<b>ブックマークバーへドラッグ</b>して登録する（最初の1回だけ）</li>
+      <li>保存したいページで、そのブックマークを押す。小窓に「受け付けました」と出て、すぐ閉じる</li>
+      <li>Facebook・LinkedIn など本文が取れないページは、<b>投稿の文章を選択してから</b>押すと本文も送れる</li>
+    </ol>
+    <p>ページに埋め込まれた PDF も読みます。保存した記事は15分以内に Obsidian の News Checker フォルダに入り、日次レポートにも載ります。</p>
+  </div>
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js');
     }
   </script>
 </body>
-</html>"""
+</html>""".replace("__BOOKMARKLET__", bookmarklet)
     return HTMLResponse(content=html)
 
 
