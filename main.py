@@ -635,6 +635,42 @@ def _strip_smartnews_chrome(text: str) -> str:
 
 _BLOCK_NOTICES = ("コンテンツブロックが有効であることを検知",)
 
+# ページに埋め込まれた PDF の在り処（2026-10-01 ユーザー依頼）。
+# IAB Tech Lab の標準文書のページは、本文が数行の紹介だけで、中身は WordPress の
+# ファイルブロック（<object data="….pdf" type="application/pdf">）に埋め込まれた PDF にある。
+_EMBED_PDF_RES = [
+    re.compile(r'<object[^>]+data=["\']([^"\']+)["\'][^>]*type=["\']application/pdf', re.I),
+    re.compile(r'<object[^>]+type=["\']application/pdf["\'][^>]*data=["\']([^"\']+)', re.I),
+    re.compile(r'<embed[^>]+src=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I),
+    # PDF.js や Google のビューアに渡しているもの（…viewer?file=…pdf / ?url=…pdf）。
+    # 下の「iframe に直接 .pdf」より先に見る（先に見るとビューア自体の URL を拾う）
+    re.compile(r'<iframe[^>]+src=["\'][^"\']*[?&](?:file|url)=([^"\'&]+\.pdf)', re.I),
+    re.compile(r'<iframe[^>]+src=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I),
+    re.compile(r'<a[^>]+class=["\'][^"\']*wp-block-file__button[^"\']*["\'][^>]*href=["\']([^"\']+\.pdf)', re.I),
+]
+# ページ自身の本文がこれより短いときだけ、埋め込み PDF を本文にする
+# （記事に参考資料の PDF が付いているだけのページでは、記事の本文を優先する）
+EMBED_PDF_MAX_PAGE_BODY = 1500
+
+
+def _find_embedded_pdf(html: str, base_url: str) -> str:
+    for pattern in _EMBED_PDF_RES:
+        m = pattern.search(html)
+        if m:
+            return urllib.parse.urljoin(base_url, html_module.unescape(urllib.parse.unquote(m.group(1))))
+    return ""
+
+
+def _read_embedded_pdf(pdf_url: str) -> dict:
+    """埋め込み PDF を取って読む。読めなければ空の dict"""
+    raw, content_type, final_url = _download_raw(pdf_url, timeout=30)
+    if not raw or not looks_like_pdf(raw, content_type, final_url or pdf_url):
+        print(f"[pdf] 埋め込みPDFを取れなかった: {pdf_url}")
+        return {}
+    pdf = read_pdf_document(pdf_url, raw, truncated=len(raw) >= HTML_MAX_BYTES)
+    print(f"[pdf] 埋め込み {pdf['pages']}ページ / 本文{len(pdf['body'])}字 / 図表{len(pdf['note'])}字 - {pdf_url}")
+    return pdf if (pdf["body"] or pdf["note"]) else {}
+
 
 def fetch_meta(url: str) -> dict:
     """
@@ -727,13 +763,23 @@ def fetch_meta(url: str) -> dict:
     # （2026-09-26「Send this Jev prompt…」の投稿がコメント277字で保存された）
     if urlparse(final_url or target).netloc.endswith("facebook.com") and description:
         body = description
+    # ページの本文が短く、PDF が埋め込まれていれば、その PDF を本文にする
+    # （ページの紹介文は頭に残す）
+    note = ""
+    if len(body) < EMBED_PDF_MAX_PAGE_BODY:
+        pdf_url = _find_embedded_pdf(html, final_url or target)
+        pdf = _read_embedded_pdf(pdf_url) if pdf_url else {}
+        if pdf:
+            intro = (body or description).strip()
+            body = f"{intro}\n\n【埋め込みPDF】\n{pdf['body']}".strip() if pdf["body"] else intro
+            note = pdf["note"]
     if not body and len(description) >= 60:
         # 本文が取れないページでも、og:description には記事の書き出しが入る。
         # 全文には及ばないが、要約やレポートの材料としては使える。
         body = description
 
     return {"title": title, "description": description[:1000],
-            "body": body, "note": "",
+            "body": body, "note": note,
             "original_url": original_url, "site": site}
 
 
