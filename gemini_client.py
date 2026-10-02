@@ -11,6 +11,7 @@ gemini_client.py - Gemini 2.5 Flash + Google Search Grounding クライアント
 """
 
 import base64
+import html as html_lib
 import json
 import os
 import unicodedata
@@ -791,6 +792,9 @@ def clean_for_speech(text: str) -> str:
 
     # 空行が続きすぎないようにまとめる
     out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+    # 英語の題名の `&#39;` `&amp;` などが記号のまま原稿に入ると、そのまま読み上げられる
+    # （2026-09-30 と 10-02 に発生。題名を保存したときの HTML の書き方が残っている）
+    out = html_lib.unescape(out)
     return renumber_articles(out.strip())
 
 
