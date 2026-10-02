@@ -234,6 +234,10 @@ def apply_typos(text: str, results: list) -> tuple:
             if wrong not in seg or wrong in right:
                 continue
             why = _auto_ok(wrong, right, r.get("excerpt", ""))
+            # 解説の冒頭は題名をそのまま読む。題名にある語は直さない
+            # （2026-10-02、X 投稿の題名「Codex研究ラボ: …」の投稿者名を本文の製品名「dots」に置き換えた）
+            if not why and _fold(wrong) and _fold(wrong) in _fold(r.get("title", "")):
+                why = "題名の語"
             if why:
                 held.append({"no": r["no"], "wrong": wrong, "right": right, "why": why})
                 continue
