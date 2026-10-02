@@ -769,6 +769,11 @@ def fetch_meta(url: str) -> dict:
     # （2026-09-26「Send this Jev prompt…」の投稿がコメント277字で保存された）
     if urlparse(final_url or target).netloc.endswith("facebook.com") and description:
         body = description
+    # Facebook のリールは og:title の頭に反応数とシェア数が付く（サーバーの所在地で言語も変わる）。
+    # 「72 cảm xúc · 14 lượt chia sẻ | 本文…」がそのまま題名になり、レポートで
+    # 「七十二の感情・十四のシェア」と読み上げられた（2026-10-03）。最初の「|」までを外す
+    if urlparse(final_url or target).netloc.endswith("facebook.com"):
+        title = re.sub(r"^[^|]*\d[^|]*·[^|]*\|\s*", "", title).strip() or title
     # ページの本文が短く、PDF が埋め込まれていれば、その PDF を本文にする
     # （ページの紹介文は頭に残す）
     note = ""
