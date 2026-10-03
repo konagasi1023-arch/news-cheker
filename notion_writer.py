@@ -423,6 +423,57 @@ def fetch_recent_articles(token: str, database_id: str, days: int,
     return articles
 
 
+def report_blocks(body_text: str) -> list:
+    """レポート本文を段落ブロックにする（Notion のブロックは1つ2000字までなので段落単位で束ねる）"""
+    blocks, chunk = [], ""
+    for para in body_text.split("\n\n"):
+        if len(chunk) + len(para) > 1800 and chunk:
+            blocks.append(chunk)
+            chunk = para
+        else:
+            chunk = f"{chunk}\n\n{para}" if chunk else para
+    if chunk:
+        blocks.append(chunk)
+    return [{"object": "block", "type": "paragraph",
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": b[:1990]}}]}}
+            for b in blocks]
+
+
+def read_report_text(token: str, page_id: str) -> str:
+    """レポートページの本文（段落ブロック）を全部読んでつなぐ"""
+    paras, cursor = [], None
+    while True:
+        q = "?page_size=100" + (f"&start_cursor={cursor}" if cursor else "")
+        res = notion_request("GET", f"/blocks/{page_id}/children{q}", token)
+        for b in res.get("results", []):
+            if b.get("type") == "paragraph":
+                paras.append("".join(r.get("plain_text", "") for r in b["paragraph"].get("rich_text", [])))
+        if not res.get("has_more"):
+            return "\n\n".join(paras)
+        cursor = res["next_cursor"]
+
+
+def replace_report_body(token: str, page_id: str, body_text: str) -> dict:
+    """
+    レポートページの本文を差し替える（ページは作り直さない＝作成時刻が次回の切り取り位置のまま）。
+    新しいブロックを追記してから古いブロックを消すので、途中で落ちても本文が空にはならない。
+    """
+    old, cursor = [], None
+    while True:
+        q = "?page_size=100" + (f"&start_cursor={cursor}" if cursor else "")
+        res = notion_request("GET", f"/blocks/{page_id}/children{q}", token)
+        old += [b["id"] for b in res.get("results", [])]
+        if not res.get("has_more"):
+            break
+        cursor = res["next_cursor"]
+    batches = _batch_blocks(report_blocks(body_text))
+    for batch in batches:
+        notion_request("PATCH", f"/blocks/{page_id}/children", token, {"children": batch})
+    for bid in old:
+        notion_request("DELETE", f"/blocks/{bid}", token)
+    return {"added": sum(len(b) for b in batches), "deleted": len(old), "requests": len(batches)}
+
+
 def save_report(title: str, body_text: str, token: str, database_id: str) -> str:
     """レポートを1ページとして DB に保存する（カテゴリ=レポート）"""
     properties = {
@@ -433,23 +484,7 @@ def save_report(title: str, body_text: str, token: str, database_id: str) -> str
         },
     }
 
-    # Notion のブロックは1つ2000字までなので段落単位で分割する
-    blocks = []
-    chunk = ""
-    for para in body_text.split("\n\n"):
-        if len(chunk) + len(para) > 1800 and chunk:
-            blocks.append(chunk)
-            chunk = para
-        else:
-            chunk = f"{chunk}\n\n{para}" if chunk else para
-    if chunk:
-        blocks.append(chunk)
-
-    children = [{
-        "object": "block",
-        "type": "paragraph",
-        "paragraph": {"rich_text": [{"type": "text", "text": {"content": b[:1990]}}]},
-    } for b in blocks]
+    children = report_blocks(body_text)
 
     # 1回で送れるのはブロック100個・本体500KBまで。以前は先頭90ブロックだけ送って
     # 残りを黙って捨てていた。115件・約9万字の日に本体が上限を超えて 413 で落ちた
