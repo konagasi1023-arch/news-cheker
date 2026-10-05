@@ -795,6 +795,10 @@ def clean_for_speech(text: str) -> str:
     # 英語の題名の `&#39;` `&amp;` などが記号のまま原稿に入ると、そのまま読み上げられる
     # （2026-09-30 と 10-02 に発生。題名を保存したときの HTML の書き方が残っている）
     out = html_lib.unescape(out)
+    # 漢数字の読み下しに算用数字が1字混ざる崩れ（二〇2六年・二〇19年）を漢数字に揃える。
+    # 前後が漢数字のときだけ（2026-10-05 に5か所。照合の「疑い」に毎日のように出ていた）
+    out = re.sub(r"(?<=[〇一二三四五六七八九])[0-9]+(?=[〇一二三四五六七八九年])",
+                 lambda m: m.group(0).translate(str.maketrans("0123456789", "〇一二三四五六七八九")), out)
     return renumber_articles(out.strip())
 
 
